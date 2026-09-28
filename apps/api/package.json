@@ -1,0 +1,41 @@
+{
+  "name": "@saas/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-tenant REST API: Fastify 5, Postgres RLS, Redis cache, token-bucket rate limiting, BullMQ producers, Prometheus metrics.",
+  "main": "./dist/server.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsx watch --clear-debounce=150 src/server.ts",
+    "start": "node dist/server.js",
+    "test": "vitest run --config ../../vitest.unit.config.ts"
+  },
+  "dependencies": {
+    "@fastify/compress": "^8.0.1",
+    "@fastify/cors": "^10.0.1",
+    "@fastify/helmet": "^13.0.1",
+    "@fastify/swagger": "^9.4.0",
+    "@fastify/swagger-ui": "^5.2.0",
+    "@node-rs/argon2": "^2.0.2",
+    "@saas/db": "*",
+    "@saas/shared": "*",
+    "bullmq": "^5.41.0",
+    "fastify": "^5.2.0",
+    "ioredis": "^5.4.2",
+    "jose": "^5.9.6",
+    "pg": "^8.13.1",
+    "pino": "^9.5.0",
+    "prom-client": "^15.1.3",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

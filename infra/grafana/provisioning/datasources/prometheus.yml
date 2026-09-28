@@ -1,0 +1,19 @@
+# A fixed `uid` is the whole point: the dashboards reference `uid: prometheus`, so they
+# can be copied into a cluster whose Prometheus service is named something else by only
+# changing this file.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    # 15s scrape interval in Prometheus → 5m rates are the shortest honest window.
+    timeInterval: 15s
+    jsonData:
+      httpMethod: POST
+      manageAlerts: false
+      prometheusType: Prometheus
+      exemplarTraceIdDestinations: []

@@ -1,0 +1,29 @@
+# Minimal routing so `docker compose up` gives you a working alert pipeline end to end:
+# rules → Prometheus → Alertmanager → UI on :9093. The only receiver is a blackhole,
+# which is the honest lab default — an example Slack webhook invites people to leave it
+# wired to a personal token.
+route:
+  # Group by tenant-independent signal, not by alert name: five pages about one broken
+  # Redis is worse than one page. `queue` keeps an API-side and a worker-side alert about
+  # the same backlog in one notification.
+  group_by: [alertname, severity]
+  group_wait: 15s
+  group_interval: 2m
+  repeat_interval: 4h
+  receiver: blackhole
+  routes:
+    # Paging class: user-visible now. Everything else can wait for a business-day inbox.
+    - matchers:
+        - severity = "critical"
+      receiver: blackhole
+      group_wait: 10s
+      repeat_interval: 1h
+
+receivers:
+  - name: blackhole
+    # Replace with:
+    #   slack_configs:
+    #     - api_url: https://hooks.slack.com/services/...
+    #       channel: '#sre-saas'
+    #       send_resolved: true
+    #       title: '{{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})'

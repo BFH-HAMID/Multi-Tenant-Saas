@@ -1,0 +1,19 @@
+# The build context is the repo root because the image builds the whole workspace
+# (apps/api imports @saas/shared and @saas/db through project references). Keeping
+# node_modules and dist out is what makes `docker build` take seconds instead of
+# minutes, and it stops a Linux-built node_modules from being copied into Alpine.
+node_modules
+**/node_modules
+**/dist
+coverage
+**/coverage
+loadtests/results
+.git
+.github
+.dockerignore
+.env
+**/.env
+**/*.log
+docs
+README.md
+LICENSE

@@ -1,0 +1,332 @@
+# Local/lab topology for Multi-Tenant SaaS — the same shape production has, so a
+# measurement made here means something:
+#
+#   nginx ──▶ api ×N ──▶ postgres            (RLS-scoped, one database, no schema-per-tenant)
+#                 │  └─▶ redis-cache  (allkeys-lru)   cache + per-tenant rate buckets
+#                 └─▶ redis-queue     (noeviction+AOF) BullMQ
+#   worker ──▶ postgres (outbox relay: claim → publish → settle) ──▶ redis-queue
+#
+# The split into two Redis instances is not decoration: the cache *must* be evictable
+# and the queue must not be, and eviction policy is per-instance, not per-key. Put both
+# in one instance and either a memory spike drops queued jobs or the cache pins memory
+# until Redis starts refusing writes. `maxmemory` here is 256/512 MB to make that
+# pressure observable on a laptop; production sizes from tenant count.
+#
+#   docker compose -f infra/compose/docker-compose.yml up --build -d
+#   curl -s localhost:8080/v1/plans | head -c 120
+#   profiles:  --profile seed   seed three demo tenants
+#              --profile load   run the load generator against api through nginx
+#              --profile ui     pgweb-ish admin? (no: see docs, use psql)
+#
+# Secrets come from `.env` next to this file (`.env.example` is the template). This file
+# is for a laptop and CI, not for a production cluster — `infra/k8s/` is that, and it
+# deliberately does not repeat these env values (k8s reads them from Secrets).
+
+name: saas
+
+x-db-creds: &db-creds
+  # app_user is the least-privilege runtime role: DML on tenant tables, no DDL, no
+  # BYPASSRLS — RLS is what keeps tenant rows apart, not a per-tenant database.
+  DATABASE_URL: postgres://app_user:${APP_USER_PASSWORD}@postgres:5432/saas
+  # Only the migration CLI reads this, and only the API has it at all.
+  DATABASE_URL_ADMIN: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/saas
+  APP_USER_PASSWORD: ${APP_USER_PASSWORD}
+
+x-redis: &redis-urls
+  REDIS_CACHE_URL: redis://redis-cache:6379/0
+  REDIS_QUEUE_URL: redis://redis-queue:6379/0
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    # 512MB of shared_buffers is above the 128MB default on purpose: under the isolation
+    # test most reads are cache hits, so what makes Postgres the bottleneck is index and
+    # WAL maintenance on the write path. `idle_in_transaction_session_timeout` aborts
+    # anything holding a lock while doing nothing, and log_min_duration_statement matches
+    # PG_SLOW_QUERY_MS (250) so the server log and /metrics agree about what "slow" means.
+    command: >-
+      postgres
+      -c max_connections=200
+      -c shared_buffers=512MB
+      -c idle_in_transaction_session_timeout=30s
+      -c log_min_duration_statement=250
+    environment:
+      POSTGRES_DB: saas
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d saas"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [data]
+    # Datastores sit on an internal-only network: no route to the internet, and no
+    # published port. If you need a psql shell, `docker compose exec postgres psql ...`.
+    restart: unless-stopped
+
+  redis-cache:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+      # No RDB/AOF: every key in this instance is either a cache entry (rebuildable from
+      # Postgres) or a token bucket that a 5-minute outage is allowed to reset. Persisting
+      # it buys nothing and costs a fork() on every save.
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    networks: [data]
+    restart: unless-stopped
+
+  redis-queue:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - noeviction
+      # BullMQ's job payloads and lock keys are the one place where losing a key to an
+      # OOM eviction means a user's report never runs. noeviction makes Redis answer with
+      # an error instead, which the outbox already handles by simply not publishing.
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis-queue-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    networks: [data]
+    restart: unless-stopped
+
+  # One-shot: applies migrations as the admin role and ensures `app_user` can log in.
+  # The app never migrates itself — a pod that can ALTER TABLE is a pod that can read
+  # every tenant, and a rollout where N pods race to migrate is a rollout you cannot roll
+  # back. `depends_on: service_healthy` is what makes `up` deterministic without a sleep.
+  migrate:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+      args:
+        BUILD_SHA: ${BUILD_SHA:-compose}
+        BUILD_VERSION: ${BUILD_VERSION:-compose}
+    image: saas/api:local
+    command: ["node", "db/dist/cli.js", "migrate"]
+    environment:
+      <<: *db-creds
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [data, internal]
+    restart: "no"
+
+  seed:
+    image: saas/api:local
+    profiles: [seed]
+    command: ["node", "db/dist/cli.js", "seed"]
+    environment:
+      <<: *db-creds
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [data, internal]
+    restart: "no"
+
+  api:
+    image: saas/api:local
+    environment:
+      <<: [*db-creds, *redis-urls]
+      NODE_ENV: production
+      # Production code path with human-readable logs — the lab must not be a different
+      # program than what ships.
+      LOG_PRETTY: "true"
+      METRICS_PORT: "9464"
+      # nginx is the only thing in front of this service, so X-Forwarded-For is trusted
+      # and ONLY from it: with TRUST_PROXY=true and no edge, any client could pick which
+      # IP the per-IP auth bucket believes it.
+      TRUST_PROXY: "true"
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET required — openssl rand -base64 48}
+      ACCESS_TOKEN_TTL: "900"
+      QUEUE_DRIVER: bullmq
+      QUEUE_NAME_PREFIX: saas
+      CACHE_ENABLED: "true"
+      RATE_LIMIT_ENABLED: "true"
+      ENABLE_SWAGGER: "true"
+      CORS_ORIGINS: http://localhost:8080
+      PG_POOL_MAX: "12"
+      # Heap cap sits under the memory limit below on purpose (~75%); V8 otherwise gets
+      # OOM-killed at the cgroup limit before it finishes a GC cycle. Kept in the same
+      # place as the limit so the two cannot drift.
+      NODE_OPTIONS: --max-old-space-size=320
+    # Replicas are scale-by-name: nginx and Prometheus both address `api`, whose DNS
+    # record returns one A record per container. `docker compose up --scale api=3` is a
+    # real 3-pod test of the shared cache and the shared token bucket.
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 420M
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+    networks: [internal, data]
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: apps/worker/Dockerfile
+      args:
+        BUILD_SHA: ${BUILD_SHA:-compose}
+        BUILD_VERSION: ${BUILD_VERSION:-compose}
+    # A separate image rather than the API image with another entrypoint: the worker's
+    # memory profile is "a few large report payloads at a time" and the API's is "many
+    # small requests", so they need different heap caps, different limits and different
+    # autoscaler signals — and the worker image never ships HTTP-facing dependencies it
+    # cannot use.
+    image: saas/worker:local
+    environment:
+      <<: *db-creds
+      REDIS_QUEUE_URL: redis://redis-queue:6379/0
+      NODE_ENV: production
+      LOG_PRETTY: "true"
+      METRICS_PORT: "9465"
+      QUEUE_DRIVER: bullmq
+      QUEUE_NAME_PREFIX: saas
+      CONCURRENCY: "4"
+      RELAY_INTERVAL_MS: "250"
+      RELAY_BATCH_SIZE: "50"
+      LEASE_SECONDS: "120"
+      PG_STATEMENT_TIMEOUT_MS: "120000"
+      SHARED_SECRET: ${INTERNAL_SECRET:?INTERNAL_SECRET required for the worker admin endpoints}
+      # No SMTP_URL: the email handler then records instead of delivering, and it says so
+      # in `worker_emails_sent_total{transport="dry-run"}` — a reviewer can tell the
+      # difference between "no email was sent" and "no email was ever configured" without
+      # reading logs. Set SMTP_URL to a Mailpit instance to flip it.
+      NODE_OPTIONS: --max-old-space-size=320
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 420M
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis-queue:
+        condition: service_healthy
+    networks: [internal, data]
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ../nginx/saas-edge.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [internal]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [internal]
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    # A working pipeline with a null receiver: the *rules* and the routing are what you
+    # test here. Before you trust paging, replace `blackhole` with a real receiver — the
+    # point of this file is that the alert exists, not that someone gets woken up.
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "9093:9093"
+    networks: [internal]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+    networks: [internal]
+    restart: unless-stopped
+
+  # `docker compose run --rm load` — the generator needs nothing but Node and the
+  # network, which is the whole reason it is dependency-free: CI runs the same script
+  # with the same thresholds against a preview namespace.
+  load:
+    profiles: [load]
+    image: node:22-alpine
+    working_dir: /work
+    volumes:
+      - ../..:/work:ro
+    environment:
+      BASE_URL: http://nginx
+      LOAD_CONFIG: /work/loadtests/smoke.config.json
+    # Swap the scenario set with -e:
+    #   docker compose run --rm -e LOAD_CONFIG=/work/loadtests/isolation.config.json load
+    command: ["sh", "-c", 'node tools/loadgen/loadgen.mjs --config "$LOAD_CONFIG"']
+    depends_on:
+      nginx:
+        condition: service_started
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+  data:
+    driver: bridge
+    # No default egress for the stateful services; they only ever talk to each other.
+    internal: true
+
+volumes:
+  pgdata:
+  redis-queue-data:
+  prometheus-data:

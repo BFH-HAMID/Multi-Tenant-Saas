@@ -1,0 +1,37 @@
+# --- Node / build ---
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+.nyc_output/
+.cache/
+.tmp/
+.pgdata/
+.redis/
+
+# --- Local service state (make dev-* writes here) ---
+.tmp-services/
+
+# --- Env & secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- k6 / load test output ---
+loadtests/results/
+*.har
+summary-*.json
+
+# --- Editors / OS ---
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/settings.json
+*.log
+npm-debug.log*
+
+# --- Kubernetes local rendering ---
+infra/k8s/.rendered/
+loadtests/results/
