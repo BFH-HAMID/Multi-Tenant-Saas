@@ -1,0 +1,52 @@
+{
+  "$comment": "Fast end-to-end sanity: does the whole funnel work under a little load? 6 seconds, one freshly registered free workspace. This is the config to run after any change to auth, tenant resolution, rate limiting or the cache, because it touches all four and asserts no 5xx. Thresholds are loose on purpose (a laptop, cold JIT); the numbers are for spotting 'a route is broken', not for tuning capacity.",
+  "baseUrl": "http://127.0.0.1:3000",
+  "metricsUrl": "http://127.0.0.1:9464/metrics",
+  "vus": 4,
+  "duration": "6s",
+  "rampUp": "500ms",
+  "slugPrefix": "smoke",
+  "seedProjects": 3,
+  "tenants": [{ "count": 1, "plan": "free" }],
+  "scenarios": [
+    { "name": "me", "method": "GET", "path": "/v1/me", "weight": 1, "thinkMs": 20 },
+    {
+      "name": "list-projects",
+      "method": "GET",
+      "path": "/v1/projects?limit=25",
+      "weight": 4,
+      "thinkMs": 20
+    },
+    {
+      "name": "get-project",
+      "method": "GET",
+      "path": "/v1/projects/{project}",
+      "weight": 3,
+      "thinkMs": 20
+    },
+    {
+      "name": "create-project",
+      "method": "POST",
+      "path": "/v1/projects",
+      "weight": 1,
+      "idempotency": true,
+      "body": { "name": "smoke write" },
+      "thinkMs": 50
+    },
+    {
+      "name": "enqueue-report",
+      "method": "POST",
+      "path": "/v1/projects/{project}/reports",
+      "weight": 1,
+      "idempotency": true,
+      "body": { "format": "csv" },
+      "thinkMs": 100
+    },
+    { "name": "plans-public", "method": "GET", "path": "/v1/plans", "weight": 1, "thinkMs": 20 }
+  ],
+  "thresholds": [
+    { "metric": "totals.error5xx", "max": 0 },
+    { "metric": "totals.requests", "min": 20 },
+    { "metric": "totals.p99Ms", "max": 1500 }
+  ]
+}

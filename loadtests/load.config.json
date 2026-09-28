@@ -1,0 +1,123 @@
+{
+  "$comment": "Capacity-shaped load against one workspace per plan, so the same mix is measured against three different buckets. Read-heavy (80%) because that is what an API behind a web UI actually serves; 10% conditional GETs because a 304 must be cheap *and* must not be served by a shared cache; 10% writes because the write path is where the tenant predicate, the quota trigger, the idempotency reservation and the cache invalidation all meet.",
+  "baseUrl": "http://127.0.0.1:3000",
+  "metricsUrl": "http://127.0.0.1:9464/metrics",
+  "vus": 24,
+  "duration": "45s",
+  "rampUp": "3s",
+  "thinkMs": 40,
+  "slugPrefix": "load",
+  "seedProjects": 10,
+  "tenants": [
+    {
+      "count": 1,
+      "plan": "free"
+    },
+    {
+      "count": 1,
+      "plan": "pro"
+    },
+    {
+      "count": 1,
+      "plan": "enterprise"
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "list-projects",
+      "method": "GET",
+      "path": "/v1/projects?limit=25&sort=createdAt&order=desc",
+      "weight": 30
+    },
+    {
+      "name": "list-members",
+      "method": "GET",
+      "path": "/v1/tenants/current/members?limit=25",
+      "weight": 5
+    },
+    {
+      "name": "conditional-list",
+      "method": "GET",
+      "path": "/v1/projects?limit=25",
+      "weight": 10,
+      "headers": {
+        "if-none-match": "W/loadtest-never-matches"
+      }
+    },
+    {
+      "name": "get-project",
+      "method": "GET",
+      "path": "/v1/projects/{project}",
+      "weight": 25
+    },
+    {
+      "name": "usage",
+      "method": "GET",
+      "path": "/v1/users/me/usage",
+      "weight": 5
+    },
+    {
+      "name": "create-project",
+      "method": "POST",
+      "path": "/v1/projects",
+      "weight": 6,
+      "idempotency": true,
+      "body": {
+        "name": "load project",
+        "tags": ["load"]
+      }
+    },
+    {
+      "name": "patch-project-cas",
+      "method": "PATCH",
+      "path": "/v1/projects/{project}",
+      "weight": 4,
+      "body": {
+        "description": "touched by the load run"
+      },
+      "headers": {
+        "if-match": "W/\"v1\""
+      },
+      "//": "A fixed etag against a row that moves, so most of these are 409s by design. The scenario keeps the compare-and-swap path hot under load; the failure mode it catches is a CAS that only works while nobody else writes."
+    },
+    {
+      "name": "enqueue-report",
+      "method": "POST",
+      "path": "/v1/projects/{project}/reports",
+      "weight": 4,
+      "idempotency": true,
+      "body": {
+        "format": "csv"
+      }
+    },
+    {
+      "name": "report-status",
+      "method": "GET",
+      "path": "/v1/reports/{job}",
+      "weight": 6
+    }
+  ],
+  "thresholds": [
+    {
+      "metric": "totals.error5xx",
+      "max": 0
+    },
+    {
+      "metric": "totals.p95Ms",
+      "max": 400
+    },
+    {
+      "metric": "totals.p99Ms",
+      "max": 1200
+    },
+    {
+      "metric": "server.throttlePct",
+      "min": 1,
+      "//": "the free workspace MUST be throttled at this rate; a run where nothing was limited proves nothing about the bucket, so the threshold is a floor, not a ceiling"
+    },
+    {
+      "metric": "server.cacheAbsoluteHitRatio",
+      "min": 0.25
+    }
+  ]
+}

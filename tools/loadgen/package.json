@@ -1,0 +1,14 @@
+{
+  "name": "@saas/tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev/ops tooling: dependency-free HTTP load generator (k6 substitute for environments without k6) and service bootstrapper.",
+  "scripts": {
+    "loadgen": "node loadgen/loadgen.mjs",
+    "services": "node services/bootstrap.mjs"
+  },
+  "dependencies": {
+    "embedded-postgres": "^18.4.0-beta.17"
+  }
+}

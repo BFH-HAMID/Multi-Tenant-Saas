@@ -1,0 +1,68 @@
+{
+  "//": "Noisy-neighbour test — the config the whole shared-infrastructure story is judged on.",
+  "//1": "One enterprise workspace floods (100-row pages, bulk report enqueues, no think time) while four free-plan workspaces behave like people. The claim is narrow and falsifiable: the attacker's load must be *contained* by the per-tenant bucket (their throttle rate rises and their own latency degrades), while the victims' p95 stays inside the envelope they see on a quiet system.",
+  "//2": "Shared database, shared worker and shared pool are decisions paid for with limits that actually bite — not with a promise. If worstVictim.p95Ms breaks while server.throttlePct stays 0, the limiter is decoration; if it holds while the queue never drains, isolation was bought with unbounded latency for the next batch of jobs.",
+  "baseUrl": "http://127.0.0.1:3000",
+  "metricsUrl": "http://127.0.0.1:9464/metrics",
+  "vus": 25,
+  "duration": "60s",
+  "rampUp": "2s",
+  "slugPrefix": "iso",
+  "seedProjects": 8,
+  "victimPlans": ["free"],
+  "tenants": [
+    { "count": 1, "plan": "enterprise" },
+    { "count": 4, "plan": "free" }
+  ],
+  "scenarios": [
+    {
+      "name": "victim-list",
+      "method": "GET",
+      "path": "/v1/projects?limit=25",
+      "weight": 6,
+      "thinkMs": 300
+    },
+    {
+      "name": "victim-get",
+      "method": "GET",
+      "path": "/v1/projects/{project}",
+      "weight": 3,
+      "thinkMs": 300
+    },
+    { "name": "victim-me", "method": "GET", "path": "/v1/me", "weight": 1, "thinkMs": 400 }
+  ],
+  "scenariosByPlan": {
+    "enterprise": [
+      {
+        "name": "blast-list-wide",
+        "method": "GET",
+        "path": "/v1/projects?limit=100&sort=updatedAt&order=desc",
+        "weight": 40
+      },
+      {
+        "name": "blast-report-enqueue",
+        "method": "POST",
+        "path": "/v1/projects/{project}/reports",
+        "weight": 30,
+        "idempotency": true,
+        "body": { "format": "csv" }
+      },
+      {
+        "name": "blast-create",
+        "method": "POST",
+        "path": "/v1/projects",
+        "weight": 20,
+        "idempotency": true,
+        "body": { "name": "blast project", "tags": ["noisy"] }
+      },
+      { "name": "blast-poll", "method": "GET", "path": "/v1/reports/{job}", "weight": 10 }
+    ]
+  },
+  "thresholds": [
+    { "metric": "totals.error5xx", "max": 0 },
+    { "metric": "worstVictim.p95Ms", "max": 500 },
+    { "metric": "worstVictim.error5xx", "max": 0 },
+    { "metric": "server.throttlePct", "min": 5 },
+    { "metric": "server.queuePending", "max": 5000 }
+  ]
+}
