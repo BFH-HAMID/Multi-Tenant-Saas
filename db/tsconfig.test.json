@@ -1,0 +1,16 @@
+{
+  // Typechecks the test suite. Vitest strips types without checking them, so a
+  // typo in an assertion compiles green and asserts nothing; this file is what
+  // makes `npm run typecheck` cover the tests too.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "incremental": false,
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["tests/**/*.ts", "src/**/*.ts"]
+}

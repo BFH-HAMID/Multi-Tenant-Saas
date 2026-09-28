@@ -1,0 +1,40 @@
+{
+  "name": "@saas/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SQL migrations (schema + RLS policies), migration runner, tenant-scoped query client, seed data.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "migrations"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "migrate": "tsx src/cli.ts migrate",
+    "migrate:status": "tsx src/cli.ts status",
+    "migrate:new": "tsx src/cli.ts new",
+    "bootstrap": "tsx src/cli.ts bootstrap",
+    "seed": "tsx src/cli.ts seed",
+    "reset": "tsx src/cli.ts reset",
+    "wait": "tsx src/cli.ts status --wait 60000",
+    "test": "vitest run --config ../../vitest.integration.config.ts",
+    "rebuild": "tsx src/cli.ts rebuild"
+  },
+  "dependencies": {
+    "@saas/shared": "*",
+    "@node-rs/argon2": "^2.0.2",
+    "pg": "^8.13.1",
+    "pino": "^9.5.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}
