@@ -1,0 +1,35 @@
+{
+  "name": "@saas/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cross-cutting contracts: zod DTOs, tenant key scheme, plan limits, token-bucket rate limiting (TS model + Lua mirror), KV abstraction, logger, metrics names.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run --config ../../vitest.unit.config.ts",
+    "sync:lua": "node scripts/sync-lua.mjs"
+  },
+  "dependencies": {
+    "pino": "^9.5.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "fengari": "^0.1.5"
+  }
+}
