@@ -1,0 +1,6 @@
+# Generated or vendored: `node infra/grafana/dashboards/build.mjs --check` compares these byte-for-byte,
+# so prettier must not reformat them (and reformatting a generated file is how a
+# "generated from source" file stops being reproducible).
+infra/grafana/dashboards/*.json
+loadtests/results/
+package-lock.json

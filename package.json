@@ -1,0 +1,54 @@
+{
+  "name": "saas-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-tenant SaaS control plane: Fastify API, Postgres RLS tenancy, Redis cache + token-bucket rate limiting, BullMQ workers, Prometheus/Grafana, k6 load tests, kustomize/K8s deploy.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "db",
+    "tools/*"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "clean": "node -e \"for (const p of ['packages/shared','apps/api','apps/worker','db']) require('fs').rmSync(p+'/dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc -b tsconfig.build.json --pretty false",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"**/*.{ts,mjs,js,json,md,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,mjs,js,json,md,yml,yaml}\"",
+    "test": "npm run test:unit",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:watch": "vitest --config vitest.unit.config.ts",
+    "coverage": "vitest run --config vitest.unit.config.ts --coverage",
+    "db:migrate": "npm run -w @saas/db migrate",
+    "db:seed": "npm run -w @saas/db seed",
+    "dev:api": "npm run -w @saas/api dev",
+    "dev:worker": "npm run -w @saas/worker dev",
+    "start:api": "npm run -w @saas/api start",
+    "load:smoke": "node tools/loadgen/loadgen.mjs --config loadtests/smoke.config.json",
+    "load:run": "node tools/loadgen/loadgen.mjs --config loadtests/load.config.json",
+    "load:isolation": "node tools/loadgen/loadgen.mjs --config loadtests/isolation.config.json",
+    "k8s:build": "kubectl kustomize infra/k8s/overlays/dev",
+    "docker:build": "docker build -f apps/api/Dockerfile -t saas/api:local . && docker build -f apps/worker/Dockerfile -t saas/worker:local .",
+    "typecheck:tests": "tsc -p packages/shared/tsconfig.test.json && tsc -p db/tsconfig.test.json && tsc -p apps/api/tsconfig.test.json && tsc -p apps/worker/tsconfig.test.json"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "@typescript-eslint/eslint-plugin": "^8.18.2",
+    "@typescript-eslint/parser": "^8.18.2",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
