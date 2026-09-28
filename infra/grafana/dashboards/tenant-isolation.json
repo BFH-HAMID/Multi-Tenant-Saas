@@ -1,0 +1,650 @@
+{
+  "uid": "saas-tenant-isolation",
+  "title": "SaaS · tenant isolation",
+  "tags": [
+    "saas",
+    "multi-tenancy",
+    "load"
+  ],
+  "description": "The noisy-neighbour view: does one enterprise workspace degrading the shared caches and pool show up for everyone else? Latency is deliberately NOT broken down per tenant — that would need a per-tenant histogram, and one tenant minting ids could make it unbounded (see docs/ARCHITECTURE.md). Instead: per-tenant traffic + throttling here, per-route latency on the API dashboard.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "15s",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "10s",
+      "15s",
+      "30s",
+      "1m",
+      "5m"
+    ]
+  },
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "label": "service",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(app_info, job)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "text": [
+            "$job"
+          ],
+          "value": [
+            "All"
+          ]
+        },
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Top tenants by requests",
+      "description": "Top 20 only (TENANT_METRIC_TOP_N): the label set is bounded on purpose so a tenant cannot create a new series by creating a new workspace.",
+      "id": 1,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (tenant) (rate(tenant_requests_total[$__rate_interval])))",
+          "legendFormat": "{{tenant}}",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Throttle share per tenant",
+      "description": "The isolation claim in one panel: a tenant at 100% throttled is being limited *because it exceeded its plan*, and everyone else should stay at 0%.",
+      "id": 2,
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tenant) (rate(tenant_requests_total{outcome=\"throttled\"}[$__rate_interval])) / clamp_min(sum by (tenant) (rate(tenant_requests_total[$__rate_interval])), 0.001)",
+          "legendFormat": "{{tenant}}",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests by route class",
+      "description": "Read vs write vs bulk mix, fleet-wide. A write storm looks different from a read storm and needs a different fix (cache vs pool vs queue).",
+      "id": 3,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route_class) (rate(tenant_requests_total[[$__rate_interval]]))",
+          "legendFormat": "{{routeClass}}",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Quota rejections (402)",
+      "description": "Plan quota is enforced in a trigger, in the same transaction as the write — so this line is the only visible sign of a quota that needs raising, and it is a business event, not an error.",
+      "id": 4,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route) (rate(http_errors_total{code=\"402\"}[$__rate_interval]))",
+          "legendFormat": "402 {{route}}",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Queue & outbox (worker)",
+      "collapsed": false,
+      "id": 5,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox depth by state",
+      "description": "pending = waiting for the relay; failed = will be retried with backoff; discarded = terminal (dead-lettered by the dispatcher, see 0013). Growing `pending` with zero relay ticks is the real outage.",
+      "id": 6,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (state) (outbox_pending_messages)",
+          "legendFormat": "{{state}}",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Oldest pending job / row",
+      "description": "The user-visible queue delay. This is the number `QueueBacklogStuck` alerts on at 60s, and why a `dead` outbox row must leave `pending` immediately: otherwise one poison message holds this gauge open for an hour and a real stall hides behind it.",
+      "id": 7,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (queue) (queue_oldest_pending_job_seconds)",
+          "legendFormat": "{{queue}}",
+          "interval": ""
+        },
+        {
+          "refId": "B",
+          "expr": "max(outbox_oldest_lag_seconds)",
+          "legendFormat": "outbox lag (s)",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Job outcomes & relay",
+      "description": "completed/skipped/retrying/failed per queue. `skipped` is idempotent replay (a published row claimed twice) — it should be rare but non-zero, and a relay that only ticks `idle` while pending grows is not consuming.",
+      "id": 8,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (queue, outcome) (increase(queue_job_results_total[5m]))",
+          "legendFormat": "{{queue}} {{outcome}}",
+          "interval": ""
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (outcome) (rate(worker_relay_ticks_total[2m]))",
+          "legendFormat": "relay {{outcome}}",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "DLQ & stalled locks",
+      "description": "Everything here needs a human. /dlq returns these; /dlq/replay (POST, ≤500 ids) puts them back through the same claim path, so a replay cannot double-execute.",
+      "id": 9,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "queue_dead_letter_depth",
+          "legendFormat": "dead-letter depth",
+          "interval": ""
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (reason) (increase(queue_dead_letters_total[15m]))",
+          "legendFormat": "dead letters by reason",
+          "interval": ""
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (job) (increase(worker_slow_jobs_total[15m]))",
+          "legendFormat": "slow jobs",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Email handler truth",
+      "description": "`transport=\"dry-run\"` means SMTP was never configured: the job ran, nothing was delivered. Printed as a metric rather than only a log line so a demo cannot be mistaken for a working mailer.",
+      "id": 10,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (transport, kind) (increase(worker_emails_sent_total[15m]))",
+          "legendFormat": "{{transport}} {{kind}}",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker saturation",
+      "description": "active jobs at CONCURRENCY for more than a few minutes = the queue is the bottleneck, and the fix is another worker pod (HPA scales on this, not on CPU: a job waiting on Postgres uses no CPU).",
+      "id": 11,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "worker_active_jobs",
+          "legendFormat": "active {{instance}}",
+          "interval": ""
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (where) (increase(worker_errors_total[10m]))",
+          "legendFormat": "errors {{where}}",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "text",
+      "title": "Reproducing the isolation result",
+      "id": 12,
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "```bash\nnpm run load:isolation      # 1 enterprise blaster (20 VUs) + 4 free victims, 60s\n```\n\nThe thresholds that must hold: `worstVictim.p95Ms <= 500`, `totals.error5xx == 0`, `server.throttlePct >= 5` (an attacker that was never throttled proves nothing). Measured numbers, including the victim p50/p95/p99 table, are in `docs/ARCHITECTURE.md` — the run is reproducible from this repo, so those numbers are a claim, not a decoration."
+      }
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "links": []
+}

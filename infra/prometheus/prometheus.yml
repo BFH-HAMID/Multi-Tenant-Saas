@@ -1,0 +1,46 @@
+# Prometheus for the compose lab. In Kubernetes the ServiceMonitor in
+# infra/k8s/monitoring/ does the same job with pod discovery; the scrape *targets*
+# (9464/9465, never the public port) and the alert rules are identical in both, on
+# purpose: a metric that only exists in one environment is how an alert is discovered
+# to be broken during the incident it was written for.
+
+global:
+  # 15s keeps `rate()` over 5m smooth while staying cheap; the load generator does
+  # not depend on this — it scrapes /metrics directly before and after a run.
+  scrape_interval: 15s
+  scrape_timeout: 5s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: compose-lab
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # DNS SD, not static_configs: with `docker compose up --scale api=3` the service
+  # name resolves to several A records and Prometheus scrapes each one. A static
+  # target would silently monitor whichever address the resolver happened to return
+  # first, which is how "only one pod has high latency" gets argued about for a week.
+  - job_name: api
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: ["api"]
+        port: 9464
+        type: A
+        refresh_interval: 15s
+    static_configs:
+      - targets: []
+
+  - job_name: worker
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: ["worker"]
+        port: 9465
+        type: A
+        refresh_interval: 15s
+    static_configs:
+      - targets: []
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
