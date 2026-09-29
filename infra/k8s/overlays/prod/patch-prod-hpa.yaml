@@ -1,0 +1,12 @@
+# Prod HPA envelope. Floor 3: a shared-DB tier should never discover it is
+# under-provisioned from an incident. Ceiling 20: above that, Postgres
+# connections (PG_POOL_MAX × pods) and the RLS read path are the next
+# bottleneck — read replicas + PgBouncer first, more pods second (see
+# docs/ARCHITECTURE.md "what changes at 10x").
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+spec:
+  minReplicas: 3
+  maxReplicas: 20

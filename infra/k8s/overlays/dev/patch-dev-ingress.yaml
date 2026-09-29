@@ -1,0 +1,36 @@
+# Dev ingress: the same wildcard shape against the dev domain, TLS left to the
+# cluster's default certificate (many dev clusters have none — ssl-redirect off
+# so curl works without --insecure gymnastics).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  tls:
+    - hosts:
+        - api.dev.saas.example.com
+        - "*.dev.saas.example.com"
+      secretName: saas-api-tls-dev
+  rules:
+    - host: api.dev.saas.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80
+    - host: "*.dev.saas.example.com"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80

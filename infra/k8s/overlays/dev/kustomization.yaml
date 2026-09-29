@@ -1,0 +1,28 @@
+# Dev overlay: one namespace, small everything, same code path as prod.
+#
+#   kubectl apply -k infra/k8s/overlays/dev
+#
+# Dev keeps the wildcard ingress (subdomain tenancy is not a prod-only feature)
+# but drops TLS to the cluster's default and pins replicas to 1 so a dev
+# cluster idles cheaply. Values that differ from prod live *only* here, so the
+# diff between the two overlays is the diff between the environments.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: saas-dev
+namePrefix: dev-
+resources:
+  - ../../base
+images:
+  - name: saas/api
+    newName: ghcr.io/bfh-hamid/multi-tenant-saas/api
+    newTag: dev
+  - name: saas/worker
+    newName: ghcr.io/bfh-hamid/multi-tenant-saas/worker
+    newTag: dev
+patches:
+  - path: patch-replicas.yaml
+    target:
+      kind: Deployment
+  - path: patch-dev-config.yaml
+  - path: patch-dev-ingress.yaml
+  - path: patch-dev-hpa.yaml

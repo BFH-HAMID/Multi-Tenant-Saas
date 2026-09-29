@@ -1,0 +1,47 @@
+%% System overview. Render: https://mermaid.live or any mermaid renderer.
+%% The same picture as infra/compose/docker-compose.yml (lab) and
+%% infra/k8s/ (prod): stateless API tier, two-purpose Redis split, one
+%% Postgres with RLS, worker tier pulling from the queue.
+flowchart LR
+    subgraph clients["Clients"]
+        web["Web app<br/>{slug}.saas.example.com"]
+        cli["API consumers"]
+    end
+
+    subgraph edge["Edge"]
+        nginx["nginx / ingress-nginx<br/>TLS · coarse per-IP flood brake · X-Forwarded-For"]
+    end
+
+    subgraph apiTier["API tier (stateless, HPA api 3..20)"]
+        api1["api pod 1"]
+        api2["api pod N<br/>(Fastify · JWT · tenant hook ·<br/>token bucket · cache-aside)"]
+    end
+
+    subgraph state["State (split by failure model)"]
+        pg[("PostgreSQL<br/>one database · RLS on every tenant table<br/>outbox · report_jobs · audit_log")]
+        rcache[("redis-cache<br/>maxmemory=allkeys-lru<br/>cache keys · rate buckets")]
+        rqueue[("redis-queue<br/>noeviction + AOF<br/>BullMQ jobs")]
+    end
+
+    subgraph workerTier["Worker tier (worker 3..N)"]
+        w1["worker pod 1"]
+        w2["worker pod M<br/>(BullMQ consumers:<br/>email · report.generate)"]
+        relay["outbox relay<br/>claim → publish → settle<br/>FOR UPDATE SKIP LOCKED"]
+    end
+
+    web --> nginx
+    cli --> nginx
+    nginx -->|"port 80 → 3000"| api1
+    nginx --> api2
+    api1 -->|"SET LOCAL app.tenant_id<br/>per transaction"| pg
+    api2 --> pg
+    api1 -->|"GET/SET t:{tenant}:c:…"| rcache
+    api1 -->|"EVALSHA token bucket"| rcache
+    api2 --> rcache
+    api1 -->|"outbox INSERT (same tx)<br/>+ best-effort enqueue"| rqueue
+    w1 --> rqueue
+    w2 --> rqueue
+    relay -->|"publish committed rows"| rqueue
+    w1 -->|"SET LOCAL app.tenant_id"| pg
+    w2 --> pg
+    relay --> pg

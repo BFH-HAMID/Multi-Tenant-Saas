@@ -1,0 +1,19 @@
+# Headless-less metrics Service for the worker. Nothing routes *to* the worker
+# over the network (BullMQ workers pull from Redis), so this Service exists for
+# exactly one consumer: the ServiceMonitor in infra/k8s/monitoring/, which
+# scrapes Endpoints. ClusterIP is enough; no ingress, no public port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/component: queue-consumer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: worker
+  ports:
+    - name: metrics
+      port: 9465
+      targetPort: metrics

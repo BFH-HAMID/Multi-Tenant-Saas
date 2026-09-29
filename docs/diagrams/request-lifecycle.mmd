@@ -1,0 +1,24 @@
+%% One request through the API. The hook order is load-bearing (apps/api/src/app.ts):
+%% auth before tenant (so the token's tid can be cross-checked against the
+%% resolved tenant), rateLimit after tenant (bucket geometry comes from the
+%% plan), idempotency last (a replay short-circuits before any handler work).
+flowchart TD
+    req["request"] --> metrics["onRequest: metrics start · request id"]
+    metrics --> auth{"auth hook:<br/>Bearer JWT?"}
+    auth -->|"verify (jose, HS256)<br/>claims: sub, tid, role"| authed["req.auth"]
+    auth -->|"auth:'none' route<br/>(login, register, health, plans)"| anon["no req.auth"]
+    authed --> tenant["tenant hook:<br/>X-Tenant-Id → X-Tenant-Slug → {slug}.host → token tid"]
+    anon --> tenant
+    tenant --> tcheck{"token tid ≠<br/>resolved tenant?"}
+    tcheck -->|"yes"| f403["403 FORBIDDEN<br/>(no header can move a token<br/>into another workspace)"]
+    tcheck -->|"no / no auth"| plan["resolve tenant row<br/>(60s cache, 5s negative)<br/>→ plan limits"]
+    plan --> rl["rate limit hook:<br/>rl:{tenantId}:{routeClass}<br/>token bucket in Redis (Lua)"]
+    rl -->|"not allowed"| f429["429 + Retry-After<br/>ratelimit_decisions_total{outcome=throttle}"]
+    rl -->|"allowed"| idem{"Idempotency-Key?"}
+    idem -->|"replay seen"| cached["200/201 replay<br/>(no handler work)"]
+    idem -->|"new / absent"| handler["handler:<br/>BEGIN;<br/>SET LOCAL app.tenant_id/user_id/role;<br/>(RLS filters every statement)<br/>COMMIT;"]
+    handler --> cache["reads: cache-aside<br/>(t:{tenant}:c:… versioned)<br/>writes: bump version = O(1) invalidation"]
+    cache --> resp["onResponse: latency, status,<br/>tenant_requests_total, access log line"]
+    f403 --> resp
+    f429 --> resp
+    cached --> resp

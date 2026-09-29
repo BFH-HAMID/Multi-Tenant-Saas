@@ -1,0 +1,19 @@
+# Dev-specific config: debug logs, swagger on, dev tenancy domain.
+# Secrets stay in the base Secret (overlaid with real dev values out-of-band —
+# `kubectl create secret … --dry-run=client -o yaml | kubectl apply -f -`).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+data:
+  LOG_LEVEL: "debug"
+  ENABLE_SWAGGER: "true"
+  TENANT_BASE_DOMAINS: "dev.saas.example.com,api.dev.saas.example.com"
+  CORS_ORIGINS: "http://localhost:8080"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker-config
+data:
+  LOG_LEVEL: "debug"

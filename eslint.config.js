@@ -43,6 +43,13 @@ export default [
       'loadtests/results/**',
       'infra/**',
       '.github/**',
+      // k6 scripts are generated (tools/loadgen --emit-k6): they run in the k6
+      // runtime, not Node, so its globals (__ENV/__VU/k6/*) are not defined
+      // here. CI keeps them honest by regenerating and diffing, and by
+      // actually executing the smoke script in the compose-smoke job.
+      'loadtests/smoke.js',
+      'loadtests/load.js',
+      'loadtests/tenant-isolation.js',
     ],
   },
   js.configs.recommended,

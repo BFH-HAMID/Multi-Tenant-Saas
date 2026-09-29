@@ -1,0 +1,205 @@
+# The same alert rules as infra/prometheus/alerts.yml, as a PrometheusRule for
+# the operator. The expressions are deliberately identical to the compose file:
+# both environments run the same code, the same ports and the same metric
+# names, so a rule edited here but not there is a rule that behaves differently
+# per environment — exactly what "test in staging" is supposed to prevent.
+# Please edit both files together (they cross-reference each other in their
+# headers).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: saas-platform
+  namespace: saas-prod
+  labels:
+    app.kubernetes.io/part-of: saas-platform
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: saas-api
+      rules:
+        - alert: ApiServerErrorRate
+          expr: |
+            sum(rate(http_errors_total{class="5xx"}[5m]))
+              /
+            clamp_min(sum(rate(http_requests_total[5m])), 0.001) > 0.01
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "5xx rate above 1% of requests"
+            description: >-
+              {{ $value | humanizePercentage }} of responses were 5xx over 5m. In this
+              design 5xx must be ~0 under any offered load: a client-visible error means
+              either Postgres, or a bug in a route. A 429 storm is NOT this alert —
+              throttling is a success of the limiter.
+            runbook_url: https://docs.saas.dev/runbook#apiservererrorrate
+
+        - alert: ApiLatencyP95High
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+            ) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "p95 request latency above 500ms"
+            description: >-
+              p95 is {{ $value | humanizeDuration }} measured by the server. Check
+              pg_pool_connections{state="waiting"} and event-loop lag before blaming the
+              database.
+            runbook_url: https://docs.saas.dev/runbook#apilatencyp95high
+
+        - alert: RateLimiterInFallbackMode
+          expr: increase(ratelimit_decisions_total{outcome="fallback"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "token bucket answered from the in-process fallback"
+            description: >-
+              The Redis Lua script was unreachable, so this pod enforced its own local
+              bucket. Enforcement is still happening, but it is per-pod: the tenant's
+              global budget is now (plan limit / replicas). Fix Redis before believing
+              any latency or throttling number.
+            runbook_url: https://docs.saas.dev/runbook#ratelimiterinfallbackmode
+
+        - alert: CacheHitRatioLow
+          expr: |
+            sum(rate(cache_lookups_total{outcome=~"hit|coalesced"}[10m]))
+              /
+            clamp_min(sum(rate(cache_lookups_total[10m])), 0.001) < 0.5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "cache hit ratio below 50%"
+            description: >-
+              Below 50% the cache is not buying the latency it costs to operate. Usual
+              causes, in order: a write-heavy tenant invalidating constantly (check
+              tenant_requests_total), a TTL shorter than the page refresh interval, or
+              an eviction policy that is allowed to evict a queue's keys (see ADR on
+              the two Redis instances).
+            runbook_url: https://docs.saas.dev/runbook#cachehitratiolow
+
+        - alert: TenantRedisUnreachable
+          expr: redis_up == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Redis dependency not answering probes ({{ $labels.dependency }})"
+            description: >-
+              cache_redis down degrades to Postgres (slower, correct). queue_redis down
+              means the outbox keeps accepting messages and growing — that is the
+              intended failure mode, but it has a limit: the queue database is not
+              allkeys-lru-evicted, so a long outage turns into disk pressure.
+            runbook_url: https://docs.saas.dev/runbook#redis
+
+        - alert: DbPoolSaturated
+          expr: pg_pool_connections{state="waiting"} > 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "connections queued behind the pool"
+            description: >-
+              {{ $value }} requests are waiting for one of PG_POOL_MAX connections.
+              Either raise the pool (max_connections × pods < Postgres limit — do the
+              arithmetic) or find the query holding one: db_query_duration_seconds and
+              PG_SLOW_QUERY_MS already logged it.
+            runbook_url: https://docs.saas.dev/runbook#dbpoolsaturated
+
+    - name: saas-queue
+      rules:
+        - alert: QueueBacklogStuck
+          expr: max(queue_oldest_pending_job_seconds) > 60
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "oldest unclaimed job older than 60s"
+            description: >-
+              Check outbox_pending_messages{state} first: `pending` growing is a worker
+              problem, `failed` growing is a handler problem, `discarded` growing means
+              producers are sending garbage (look at last_error in `outbox`).
+            runbook_url: https://docs.saas.dev/runbook#queuebacklogstuck
+
+        - alert: WorkerRelayNotTicking
+          expr: sum(rate(worker_relay_ticks_total[2m])) == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "outbox relay stopped iterating"
+            description: >-
+              The relay is what turns committed rows into enqueued jobs, so a stopped
+              relay looks like "nothing is happening" from the outside and never errors.
+              A worker can be /livez-green, /readyz-green and fully stalled — this is
+              the only alert that catches it.
+            runbook_url: https://docs.saas.dev/runbook#workerrelaynotticking
+
+        - alert: DeadLettersArriving
+          expr: increase(queue_dead_letters_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "jobs reached the dead-letter queue"
+            description: >-
+              {{ $value }} dead-lettered in 15m by reason {{ $labels.reason }}. These
+              are deliberate (retries exhausted), so this is not an outage — it is a
+              queue of work for a human, and /dlq/replay is how it goes back. If the
+              reason is `invalid_payload`, a producer is writing rows the consumer
+              cannot parse.
+            runbook_url: https://docs.saas.dev/runbook#deadlettersarriving
+
+        - alert: OutboxNotDraining
+          expr: |
+            increase(outbox_published_total[10m]) == 0
+              and
+            sum(outbox_pending_messages) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "outbox accepting messages but publishing none"
+            description: >-
+              Producers are committing rows and nothing is being relayed. Almost always
+              a lease/permission problem, not a Redis problem. Check the worker pods
+              and app.outbox_claim_batch grants before touching Redis.
+            runbook_url: https://docs.saas.dev/runbook#outboxnotdraining
+
+    - name: saas-auth
+      rules:
+        - alert: RefreshTokenReuseDetected
+          expr: increase(auth_events_total{event="reuse_detected"}[10m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "refresh-token reuse detected (possible token theft)"
+            description: >-
+              {{ $value }} reuse events in 10m. The sessions for the affected token
+              families were revoked, so users will report "I was logged out" — that is
+              the control working. Investigate the source IPs of the logins that
+              followed.
+            runbook_url: https://docs.saas.dev/runbook#reftokenreuse
+
+        - alert: LoginFailureStorm
+          expr: |
+            sum(rate(auth_events_total{event="login_failure"}[5m])) > 1
+              and
+            sum(rate(auth_events_total{event="login_success"}[5m])) < 0.2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "credential stuffing pattern"
+            description: >-
+              High failures with almost no successes. The per-IP auth bucket and the
+              argon2id cost are the two brakes; check that RATE_LIMIT_ENABLED is true
+              and that the ingress still sets X-Forwarded-For, otherwise every attacker
+              shares one tenant bucket instead of getting their own per-IP one.
+            runbook_url: https://docs.saas.dev/runbook#loginfailurestorm
