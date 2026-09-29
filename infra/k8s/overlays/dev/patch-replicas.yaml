@@ -1,0 +1,15 @@
+# Dev runs one of each: enough to see the shared-state story (one Redis bucket,
+# one Postgres, one cache) without paying for a fleet.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  replicas: 1

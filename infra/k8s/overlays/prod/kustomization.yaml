@@ -1,0 +1,35 @@
+# Prod overlay. CD (.github/workflows/cd.yml) rewrites the image tags with the
+# exact digest it just pushed, applies the migrate Job first, waits for it,
+# then applies this overlay.
+#
+#   kubectl apply -k infra/k8s/overlays/prod
+#
+# What differs from dev, and why, is the whole point of an overlay:
+#   - 3 API / 3 worker replicas (PDB minAvailable 2 keeps a drain survivable)
+#   - HPA 3..20 (base's CPU/memory metrics; RPS via prometheus-adapter when
+#     installed — see the block in base/hpa.yaml)
+#   - bigger requests/limits + heap caps matched to them
+#   - stricter security posture (seccomp enforced by the base already)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: saas-prod
+namePrefix: prod-
+resources:
+  - ../../base
+images:
+  - name: saas/api
+    newName: ghcr.io/bfh-hamid/multi-tenant-saas/api
+    newTag: latest # CD pins the digest per release
+  - name: saas/worker
+    newName: ghcr.io/bfh-hamid/multi-tenant-saas/worker
+    newTag: latest
+patches:
+  # Multi-document patch files self-target by their own apiVersion/kind/name
+  # (api → api, worker → worker). No `target:` block: a target requires a
+  # single-document patch that matches exactly one resource, and `kind:
+  # Deployment` alone matches two.
+  - path: patch-replicas.yaml
+  - path: patch-prod-api.yaml
+  - path: patch-prod-worker.yaml
+  - path: patch-prod-hpa.yaml
+  - path: patch-prod-pdb.yaml

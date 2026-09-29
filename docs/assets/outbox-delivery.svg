@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" role="img" aria-label="Transactional outbox delivery: commit, fast path publish, relay, retry, dead-letter queue">
+  <rect width="960" height="360" fill="#0b1220"/>
+  <text x="16" y="28" fill="#e8edf5" font-size="15" font-weight="bold">DELIVERY — TRANSACTIONAL OUTBOX, AT-LEAST-ONCE</text>
+  <text x="944" y="28" fill="#7e8aa3" font-size="10" text-anchor="end">a job is durable exactly when the 2xx is</text>
+  <line x1="16" y1="40" x2="944" y2="40" stroke="#23324d"/>
+
+  <!-- API + its transaction -->
+  <rect x="16" y="64" width="270" height="92" rx="8" fill="#111a2e" stroke="#23324d"/>
+  <text x="30" y="86" fill="#e8edf5" font-size="13" font-weight="bold">API · withTenant()</text>
+  <text x="30" y="104" fill="#7e8aa3" font-size="9">BEGIN</text>
+  <text x="30" y="118" fill="#7e8aa3" font-size="9">INSERT report_jobs …</text>
+  <text x="30" y="132" fill="#a78bfa" font-size="9">INSERT outbox …            ← same tx</text>
+  <text x="30" y="146" fill="#34d399" font-size="9">COMMIT</text>
+  <rect x="212" y="136" width="66" height="16" rx="4" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-opacity="0.5">
+    <animate attributeName="fill-opacity" values="0.12;0.45;0.12" dur="3.5s" repeatCount="indefinite"/>
+  </rect>
+  <text x="245" y="148" fill="#34d399" font-size="9" text-anchor="middle">202 OK</text>
+
+  <!-- outbox table inside Postgres -->
+  <rect x="16" y="208" width="270" height="64" rx="8" fill="#111a2e" stroke="#60a5fa" stroke-opacity="0.5"/>
+  <text x="30" y="230" fill="#60a5fa" font-size="13" font-weight="bold">outbox (Postgres)</text>
+  <text x="30" y="246" fill="#7e8aa3" font-size="9">pending → published · lease 120 s</text>
+  <text x="30" y="260" fill="#7e8aa3" font-size="9">FOR UPDATE SKIP LOCKED · batch 50</text>
+
+  <!-- relay -->
+  <rect x="356" y="208" width="180" height="64" rx="8" fill="#111a2e" stroke="#23324d"/>
+  <text x="446" y="232" fill="#e8edf5" font-size="13" font-weight="bold" text-anchor="middle">RELAY</text>
+  <text x="446" y="248" fill="#7e8aa3" font-size="9" text-anchor="middle">worker · 250 ms tick</text>
+  <text x="446" y="262" fill="#7e8aa3" font-size="9" text-anchor="middle">safety net, not hot path</text>
+
+  <!-- BullMQ -->
+  <rect x="608" y="64" width="160" height="92" rx="8" fill="#111a2e" stroke="#23324d"/>
+  <text x="688" y="90" fill="#fbbf24" font-size="13" font-weight="bold" text-anchor="middle">BULLMQ</text>
+  <text x="688" y="108" fill="#7e8aa3" font-size="9" text-anchor="middle">redis-queue</text>
+  <text x="688" y="122" fill="#7e8aa3" font-size="9" text-anchor="middle">noeviction + AOF</text>
+  <text x="688" y="136" fill="#7e8aa3" font-size="9" text-anchor="middle">retries · backoff</text>
+
+  <!-- worker -->
+  <rect x="608" y="208" width="160" height="64" rx="8" fill="#111a2e" stroke="#23324d"/>
+  <text x="688" y="230" fill="#e8edf5" font-size="13" font-weight="bold" text-anchor="middle">WORKER</text>
+  <text x="688" y="246" fill="#7e8aa3" font-size="9" text-anchor="middle">idempotent claim first:</text>
+  <text x="688" y="260" fill="#7e8aa3" font-size="9" text-anchor="middle">tenant + idempotency-key</text>
+
+  <!-- DLQ -->
+  <rect x="828" y="208" width="116" height="64" rx="8" fill="#111a2e" stroke="#f87171" stroke-opacity="0.6"/>
+  <text x="886" y="230" fill="#f87171" font-size="13" font-weight="bold" text-anchor="middle">DLQ</text>
+  <text x="886" y="246" fill="#7e8aa3" font-size="9" text-anchor="middle">after 4 attempts</text>
+  <text x="886" y="260" fill="#7e8aa3" font-size="9" text-anchor="middle">/dlq/replay</text>
+
+  <!-- paths -->
+  <g stroke="#23324d" stroke-width="2">
+    <!-- fast path: API -> BullMQ (published only AFTER commit) -->
+    <path d="M286,96 C420,96 470,96 608,96" fill="none"/>
+    <!-- relay path: outbox -> relay -> BullMQ -->
+    <path d="M286,240 L356,240" fill="none"/>
+    <path d="M536,240 C580,240 570,120 608,120" fill="none"/>
+    <!-- worker path: BullMQ -> worker -->
+    <path d="M688,156 L688,208" fill="none"/>
+    <!-- retry loop: worker -> BullMQ -->
+    <path d="M768,224 L800,224 L800,180 L768,180" fill="none" stroke-dasharray="4 3"/>
+    <!-- dead path: worker -> DLQ -->
+    <path d="M768,252 L828,252" fill="none" stroke-dasharray="4 3"/>
+    <!-- settle: relay marks published -->
+    <path d="M446,272 L446,300 L151,300 L151,272" fill="none" stroke-dasharray="2 3"/>
+  </g>
+  <text x="446" y="88" fill="#34d399" font-size="9" text-anchor="middle">after COMMIT → queue.add()</text>
+  <text x="318" y="232" fill="#a78bfa" font-size="9">claim</text>
+  <text x="700" y="184" fill="#7e8aa3" font-size="9">consume</text>
+  <text x="798" y="204" fill="#fbbf24" font-size="9" text-anchor="end">retry</text>
+  <text x="798" y="268" fill="#f87171" font-size="9" text-anchor="end">give up</text>
+  <text x="300" y="296" fill="#7e8aa3" font-size="9">settle row</text>
+
+  <!-- moving dots -->
+  <!-- blue: the fast path (publish after commit, ~0 added latency) -->
+  <circle r="5" fill="#60a5fa">
+    <animateMotion dur="3.5s" repeatCount="indefinite" path="M286,96 C420,96 470,96 608,96 L688,96 L688,208"/>
+    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.95;1" dur="3.5s" repeatCount="indefinite"/>
+  </circle>
+  <!-- purple: the relay sweep, slower, always behind -->
+  <circle r="5" fill="#a78bfa">
+    <animateMotion dur="6.5s" repeatCount="indefinite" path="M286,240 L356,240 L536,240 C580,240 570,120 608,120 L688,120 L688,208"/>
+    <animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.05;0.95;1" dur="6.5s" repeatCount="indefinite"/>
+  </circle>
+  <!-- red: poison message to the DLQ, occasional -->
+  <circle r="4" fill="#f87171">
+    <animateMotion dur="13s" repeatCount="indefinite" path="M768,252 L828,252"/>
+    <animate attributeName="opacity" values="0;0;1;0" keyTimes="0;0.87;0.93;1" dur="13s" repeatCount="indefinite"/>
+  </circle>
+  <!-- amber: retry hop, occasional -->
+  <circle r="4" fill="#fbbf24">
+    <animateMotion dur="9s" repeatCount="indefinite" path="M768,224 L800,224 L800,180 L768,180"/>
+    <animate attributeName="opacity" values="0;0;1;0" keyTimes="0;0.6;0.8;1" dur="9s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- footer -->
+  <rect x="16" y="316" width="928" height="32" rx="8" fill="#111a2e" stroke="#23324d"/>
+  <text x="32" y="336" fill="#e8edf5" font-size="11">redis-queue down?  the outbox absorbs it — rows wait, <tspan fill="#a78bfa">outbox_pending_messages</tspan> pages, relay drains on recovery.   Measured: <tspan fill="#34d399" font-weight="bold">0 lost report jobs</tspan> across every load run.</text>
+</svg>

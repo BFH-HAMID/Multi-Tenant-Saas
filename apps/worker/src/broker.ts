@@ -82,13 +82,16 @@ export function createBroker(deps: BrokerDeps): Broker {
       keyPrefix: deps.keyPrefix,
     });
 
+  // Queue names stay bare: BullMQ rejects ':' inside a name, and the namespace
+  // belongs to the `prefix` *option* so every key becomes
+  // `{prefix}:{queue}:{…}` — exactly the keys the API's producer creates.
   const names = {
-    email: `${deps.prefix}:${QUEUES.email}`,
-    reports: `${deps.prefix}:${QUEUES.reports}`,
-    dead: `${deps.prefix}:${QUEUES.deadLetter}`,
+    email: QUEUES.email,
+    reports: QUEUES.reports,
+    dead: QUEUES.deadLetter,
   };
 
-  const dlq = new Queue(names.dead, { connection: connection(), prefix: '' });
+  const dlq = new Queue(names.dead, { connection: connection(), prefix: deps.prefix });
   const workers: Worker[] = [];
 
   const makeWorker = (queueName: string) =>
@@ -112,7 +115,7 @@ export function createBroker(deps: BrokerDeps): Broker {
           maxAttempts: (job.opts.attempts as number | undefined) ?? QUEUE_DEFAULTS.attempts,
           source: 'bullmq',
         };
-        deps.metrics.activeJobs.inc({ queue: queueName.slice(deps.prefix.length + 1) });
+        deps.metrics.activeJobs.inc({ queue: queueName });
         try {
           const result = await deps.dispatch(envelope);
           if (result.kind === 'retry') {
@@ -143,7 +146,7 @@ export function createBroker(deps: BrokerDeps): Broker {
           }
           return result;
         } finally {
-          deps.metrics.activeJobs.dec({ queue: queueName.slice(deps.prefix.length + 1) });
+          deps.metrics.activeJobs.dec({ queue: queueName });
         }
       },
       {
@@ -153,7 +156,8 @@ export function createBroker(deps: BrokerDeps): Broker {
         // re-claimed on a schedule the operator can reason about.
         lockDuration: QUEUE_DEFAULTS.lockDuration,
         maxStalledCount: QUEUE_DEFAULTS.maxStalledCount,
-        prefix: '',
+        // Same namespace the producer uses — see the `names` note above.
+        prefix: deps.prefix,
       },
     );
 
@@ -186,7 +190,7 @@ export function createBroker(deps: BrokerDeps): Broker {
       const out: Record<string, Record<string, number>> = {};
       await Promise.all(
         [names.email, names.reports, names.dead].map(async (name) => {
-          const q = new Queue(name, { connection: connection(), prefix: '' });
+          const q = new Queue(name, { connection: connection(), prefix: deps.prefix });
           try {
             const counts = await q.getJobCounts(
               'waiting',
@@ -195,7 +199,7 @@ export function createBroker(deps: BrokerDeps): Broker {
               'failed',
               'completed',
             );
-            out[name.slice(deps.prefix.length + 1)] = counts as unknown as Record<string, number>;
+            out[name] = counts as unknown as Record<string, number>;
           } finally {
             await q.close();
           }

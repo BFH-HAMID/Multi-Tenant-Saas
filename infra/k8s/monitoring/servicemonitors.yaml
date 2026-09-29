@@ -1,0 +1,42 @@
+# ServiceMonitors for the prometheus-operator. Ports by *name* (http/metrics),
+# not number: a renamed port breaks a name reference loudly (no targets) while
+# a number reference silently keeps scraping whatever moved into that slot.
+#
+# 15s interval matches the compose lab exactly, so `rate(...[5m])` behaves the
+# same in both environments and the alert thresholds mean the same thing.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: api
+  namespace: saas-prod
+  labels:
+    app.kubernetes.io/name: api
+    # Must match Prometheus spec.serviceMonitorSelector (see README above).
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  endpoints:
+    - port: metrics # 9464 — the internal listener, never the public port
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 5s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: worker
+  namespace: saas-prod
+  labels:
+    app.kubernetes.io/name: worker
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: worker
+  endpoints:
+    - port: metrics # 9465
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 5s

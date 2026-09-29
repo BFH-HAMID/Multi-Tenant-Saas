@@ -1,0 +1,120 @@
+# The API: stateless pods, everything shared in Postgres/Redis, so scaling is
+# `replicas` (HPA) and nothing else. The manifest and the code agree on shutdown:
+# preStopsleep(5) + readiness flip covers endpoint propagation, the app's own
+# SHUTDOWN_GRACE_MS bounds the drain, terminationGracePeriodSeconds is the sum
+# plus headroom (see apps/api/src/server.ts for the other half of the contract).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: http-api
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    # maxUnavailable 0 + maxSurge 1: capacity never drops below the HPA floor
+    # during a rollout — with per-tenant rate limits, a dropped pod's traffic
+    # lands on peers that then serve it *outside* the measured capacity.
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+        app.kubernetes.io/component: http-api
+      annotations:
+        # Prometheus Operator picks these up only when ServiceMonitor-based
+        # discovery is not in play (infra/k8s/monitoring/); kept for clusters
+        # that scrape by annotation instead. Same port either way: metrics
+        # never ride the public listener.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000 # "node" in the runtime image
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread replicas across zones: a shared-nothing stateless tier still has
+      # one shared failure domain (the DB), but a whole-zone outage taking
+      # both pods is a rollout-shaped hole in the availability story.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: api
+          image: saas/api:local # overlays set the real registry/tag
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+            - name: metrics
+              containerPort: 9464
+          envFrom:
+            - configMapRef:
+                name: api-config
+            - secretRef:
+                name: api-secrets
+          # The heap cap lives next to the memory limit on purpose (~75% of it):
+          # Node gets OOM-killed by the cgroup before V8 finishes GC otherwise.
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=280"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          readinessProbe:
+            # /readyz reads Postgres + Redis: a pod that cannot serve correctly
+            # must leave the Service endpoints even while the process is alive.
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            # /healthz is process-only: a Postgres blip must remove pods from
+            # rotation (readiness), not restart them into a crash loop.
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                # Endpoint removal is asynchronous; the pod keeps receiving
+                # traffic for a few seconds after SIGTERM. The server flips
+                # readiness off at SIGTERM, this sleep covers the propagation.
+                command: ["sh", "-c", "sleep 5"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

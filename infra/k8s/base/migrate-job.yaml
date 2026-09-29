@@ -1,0 +1,56 @@
+# Migrations run as a Job, before the rollout, as the admin role — never inside
+# a long-lived pod (a pod that can ALTER TABLE is a pod that can read every
+# tenant; N pods racing to migrate is a rollout you cannot roll back). CD
+# applies this first and waits for completion, then applies the Deployments:
+# see .github/workflows/cd.yml.
+#
+# The Job object is immutable, so CD deletes any completed run before applying
+# (`kubectl delete job migrate --ignore-not-found`) — ttlSecondsAfterFinished
+# also cleans up after itself on clusters ≥1.21.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  labels:
+    app.kubernetes.io/name: migrate
+    app.kubernetes.io/component: schema
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: migrate
+        app.kubernetes.io/component: schema
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          # Same image as the API: it already ships db/dist + db/migrations.
+          image: saas/api:local
+          imagePullPolicy: IfNotPresent
+          command: ["node", "db/dist/cli.js", "migrate"]
+          envFrom:
+            - secretRef:
+                name: api-secrets
+          env:
+            - name: NODE_ENV
+              value: "production"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

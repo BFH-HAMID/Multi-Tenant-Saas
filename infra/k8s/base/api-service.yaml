@@ -1,0 +1,21 @@
+# Public Service for the API. One port for traffic, one for Prometheus — the
+# metrics port is ClusterIP-internal only (the ingress never fronts 9464, same
+# rule as the compose lab's internal network).
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: http-api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: metrics
+      port: 9464
+      targetPort: metrics

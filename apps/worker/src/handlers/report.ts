@@ -107,7 +107,21 @@ export interface ReportRequest {
 }
 
 export type ReportResult =
-  { kind: 'done'; summary: Record<string, unknown> } | { kind: 'skipped'; reason: string };
+  | { kind: 'done'; summary: Record<string, unknown> }
+  | { kind: 'skipped'; reason: string }
+  /**
+   * The row is not visible *yet* — a transient outcome by construction. The
+   * only writer of `report_jobs` commits it in the same transaction as the
+   * outbox row that delivered this message, so "missing" usually means the
+   * delivery won the race against COMMIT, not that the job was withdrawn.
+   * Returning `retry` (instead of `skipped`) releases the idempotency claim
+   * and lets the transport schedule a redelivery; a job that is still missing
+   * after its retry budget is dead-lettered loudly. Treating it as a skip
+   * once silently lost ~14% of all report jobs: the claim settled as
+   * completed, the relay saw "replay", and the row sat in `queued` forever
+   * with every metric green.
+   */
+  | { kind: 'retry'; reason: 'job-row-missing' };
 
 export async function runReport(deps: ReportDeps, req: ReportRequest): Promise<ReportResult> {
   const { db, log } = deps;
@@ -132,8 +146,11 @@ export async function runReport(deps: ReportDeps, req: ReportRequest): Promise<R
   );
 
   if (!job) {
-    // The row is gone (tenant deleted, retention prune). Retrying cannot help.
-    return { kind: 'skipped', reason: 'job-row-missing' };
+    // Transient by assumption: the enqueue transaction may not be visible to
+    // this snapshot yet (see the type comment above). Retry; if the row is
+    // genuinely gone (tenant deleted, retention prune) the retry budget runs
+    // out and the job is dead-lettered — loud, which a vanishing job deserves.
+    return { kind: 'retry', reason: 'job-row-missing' };
   }
   if (job.status === 'completed') {
     return { kind: 'skipped', reason: 'already-completed' };

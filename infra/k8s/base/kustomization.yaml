@@ -1,0 +1,29 @@
+# Base manifests: the deployment shape both environments share.
+#
+#   kubectl kustomize infra/k8s/base            # what is here
+#   kubectl kustomize infra/k8s/overlays/dev    # what a dev namespace gets
+#   kubectl apply -k infra/k8s/overlays/prod    # what ships
+#
+# The base encodes the decisions that are NOT environment-specific (see
+# docs/adr/0008-kubernetes.md): stateless API pods behind an HPA, a separate
+# worker Deployment (different memory profile, different scaling signal), probes
+# split between liveness (/healthz — process only) and readiness (/readyz —
+# dependencies), preStop sleep matching the app's SHUTDOWN_GRACE_MS, and
+# migrations as a Job that runs *before* the rollout, never inside a pod.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - api-deployment.yaml
+  - api-service.yaml
+  - worker-deployment.yaml
+  - worker-service.yaml
+  - ingress.yaml
+  - hpa.yaml
+  - pdb.yaml
+  - migrate-job.yaml
+  - configmap.yaml
+  - secret.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: saas-platform
+    includeSelectors: false

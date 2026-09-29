@@ -36,6 +36,23 @@ export interface TenantContext {
   readOnly?: boolean;
 }
 
+/**
+ * Post-commit side effects of a tenant transaction.
+ *
+ * Exists for one specific bug class: the transactional outbox's "fast path".
+ * Publishing to a queue from *inside* the business transaction is a dual-write
+ * in disguise — the broker makes the job visible before the database makes the
+ * row visible, a consumer reads a not-yet-committed row, sees nothing, and
+ * (if the consumer treats "no row" as success) the job is silently lost. The
+ * only correct moment to notify the outside world is *after* COMMIT returns,
+ * which is exactly what `afterCommit` guarantees: callbacks run only if the
+ * transaction committed, never on rollback, and never inside the transaction.
+ */
+export interface TransactionScope {
+  /** Register work to run after this transaction commits. Best-effort. */
+  afterCommit(fn: () => unknown): void;
+}
+
 /** What one instrumented statement/transaction looked like, from the outside. */
 export interface QueryObservation {
   ms: number;
@@ -63,7 +80,10 @@ export interface Database {
     text: string,
     params?: readonly unknown[],
   ): Promise<pg.QueryResult<T>>;
-  withTenant<T>(ctx: TenantContext, fn: (tx: pg.PoolClient) => Promise<T>): Promise<T>;
+  withTenant<T>(
+    ctx: TenantContext,
+    fn: (tx: pg.PoolClient, scope: TransactionScope) => Promise<T>,
+  ): Promise<T>;
   withClient<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T>;
   healthcheck(): Promise<{ ok: boolean; latencyMs: number; error?: string }>;
   stats(): { total: number; idle: number; waiting: number };
@@ -185,8 +205,21 @@ export function createDatabase(opts: DatabaseOptions): Database {
       }
     },
 
-    async withTenant<T>(ctx: TenantContext, fn: (tx: pg.PoolClient) => Promise<T>): Promise<T> {
+    async withTenant<T>(
+      ctx: TenantContext,
+      fn: (tx: pg.PoolClient, scope: TransactionScope) => Promise<T>,
+    ): Promise<T> {
       const client = await pool.connect();
+      // Filled by `scope.afterCommit`; emptied by running them. If the
+      // transaction rolls back, `committed` stays false and they never run —
+      // that is the entire contract.
+      const hooks: Array<() => unknown> = [];
+      const scope: TransactionScope = {
+        afterCommit(fn2) {
+          hooks.push(fn2);
+        },
+      };
+      let committed = false;
       try {
         await client.query('BEGIN');
         if (ctx.readOnly) {
@@ -198,8 +231,9 @@ export function createDatabase(opts: DatabaseOptions): Database {
           // this pooled connection cannot survive into the next request.
           await client.query('SELECT set_config($1, $2, true)', [guc, value ?? null]);
         }
-        const result = await instrument(() => fn(client), 'transaction', ctx, 'transaction');
+        const result = await instrument(() => fn(client, scope), 'transaction', ctx, 'transaction');
         await client.query('COMMIT');
+        committed = true;
         return result;
       } catch (err) {
         try {
@@ -210,6 +244,20 @@ export function createDatabase(opts: DatabaseOptions): Database {
         throw err;
       } finally {
         client.release();
+        if (committed) {
+          // Post-commit side effects run on the (now released) pool, outside
+          // the transaction. A hook failure must never turn a committed
+          // transaction into an error for the caller: the durable outbox row
+          // is already committed, so the relay is the safety net for any
+          // hook that fails.
+          for (const hook of hooks) {
+            try {
+              await hook();
+            } catch (err) {
+              opts.log?.warn({ err: String(err) }, 'afterCommit hook failed');
+            }
+          }
+        }
       }
     },
 

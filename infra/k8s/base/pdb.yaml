@@ -1,0 +1,26 @@
+# Disruption budgets. Both tiers must keep ≥1 replica through node drains —
+# with replicas: 2 that still means a brief single-replica window during
+# maintenance, which is the accepted trade (the prod overlay raises both).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+  labels:
+    app.kubernetes.io/name: api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: worker
+  labels:
+    app.kubernetes.io/name: worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: worker

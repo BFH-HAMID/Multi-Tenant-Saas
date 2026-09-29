@@ -1,6 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import { createDatabase, type MinimalLogger } from '@saas/db';
-import { createLogger } from '@saas/shared';
+import { createLogger, QUEUES } from '@saas/shared';
 import { createBroker, type Broker } from './broker.js';
 import { startCollectors } from './collectors.js';
 import { loadConfig, type WorkerConfig } from './config.js';
@@ -104,9 +104,9 @@ export async function startWorker(
     ? createBroker({
         url: cfg.env.REDIS_QUEUE_URL,
         prefix: cfg.env.QUEUE_NAME_PREFIX,
-        // BullMQ uses the Redis `keyPrefix` for nothing but its own bookkeeping;
-        // queue names are already prefixed, and double-prefixing is how a queue
-        // silently stops being the one the API produces into.
+        // BullMQ's Redis `keyPrefix` option would double-prefix every key (the
+        // queue namespace already goes in as BullMQ's `prefix`), which is how a
+        // queue silently stops being the one the API produces into.
         keyPrefix: undefined,
         log,
         metrics,
@@ -129,7 +129,7 @@ export async function startWorker(
     onDead: async (env, result) => {
       if (broker) {
         await broker.pushDeadLetter({
-          queue: `${cfg.env.QUEUE_NAME_PREFIX}:dead-letter`,
+          queue: QUEUES.deadLetter,
           job: env.topic,
           tenantId: env.tenantId,
           idempotencyKey: env.idempotencyKey,

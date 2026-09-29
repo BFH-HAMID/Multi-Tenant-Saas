@@ -1,6 +1,6 @@
 import { buildApp, type BuildOptions } from '../../src/app.js';
 import { loadConfig, type AppConfig } from '../../src/config/index.js';
-import type { Database, MinimalLogger, TenantContext } from '@saas/db';
+import type { Database, MinimalLogger, TenantContext, TransactionScope } from '@saas/db';
 import type { FastifyInstance } from 'fastify';
 import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 
@@ -86,11 +86,20 @@ export function stubDatabase(): StubDatabase {
       calls.push({ sql: text, params, ctx: null });
       return result<TR>(text, params);
     },
-    async withTenant<T>(_ctx: TenantContext, fn: (tx: PoolClient) => Promise<T>): Promise<T> {
+    async withTenant<T>(
+      _ctx: TenantContext,
+      fn: (tx: PoolClient, scope: TransactionScope) => Promise<T>,
+    ): Promise<T> {
       // The stub mirrors the real signature closely enough that a handler which
-      // forgets `withTenant` shows up as a `ctx: null` entry in `calls`.
+      // forgets `withTenant` shows up as a `ctx: null` entry in `calls`. The
+      // scope hands tests a no-op afterCommit: hooking the stub would make
+      // unit tests depend on commit semantics they cannot reproduce anyway.
       calls.push({ sql: `-- begin tenant ${_ctx.tenantId ?? 'none'}`, params: [], ctx: _ctx });
-      const out = await fn(client as PoolClient);
+      const out = await fn(client as PoolClient, {
+        afterCommit() {
+          /* stub: post-commit hooks only execute against a real database */
+        },
+      });
       calls.push({ sql: '-- commit', params: [], ctx: _ctx });
       return out;
     },

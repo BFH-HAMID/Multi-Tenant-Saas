@@ -1,0 +1,72 @@
+# Non-secret configuration. Everything here boots with the same env schema the
+# compose lab uses (apps/api/src/config/index.ts is the single source of truth),
+# so a value that works locally is a value that works in the cluster, and the
+# diff between dev and prod is visible in git instead of implied.
+#
+# Secrets (DATABASE_URL, JWT_SECRET, …) live in secret.yaml; URLs are in the
+# Secret too because managed-Postgres/Redis DSNs embed credentials.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: http-api
+data:
+  NODE_ENV: "production"
+  SERVICE_NAME: "api"
+  HOST: "0.0.0.0"
+  PORT: "3000"
+  METRICS_PORT: "9464"
+  INTERNAL_LISTENER_ENABLED: "true"
+  # TRUST_PROXY is true here and ONLY here: the ingress is the single proxy in
+  # front of the pods and it rewrites X-Forwarded-For. With it false, every
+  # client would share the ingress pod's IP for the per-IP auth bucket; with it
+  # true and no edge, a client could pick its own IP — the nginx/compose lab has
+  # the same setting with the same reasoning (see infra/nginx/saas-edge.conf).
+  TRUST_PROXY: "true"
+  # Subdomain tenancy: {slug}.saas.example.com resolves the tenant before any
+  # handler runs. Dev overlay patches this to its own domain.
+  TENANT_BASE_DOMAINS: "saas.example.com,api.saas.example.com"
+  PG_POOL_MAX: "12"
+  PG_STATEMENT_TIMEOUT_MS: "5000"
+  CACHE_ENABLED: "true"
+  RATE_LIMIT_ENABLED: "true"
+  RATE_LIMIT_FALLBACK_MEMORY: "true"
+  QUEUE_DRIVER: "bullmq"
+  QUEUE_NAME_PREFIX: "saas"
+  ACCESS_TOKEN_TTL: "900"
+  REFRESH_TOKEN_TTL_DAYS: "30"
+  SHUTDOWN_GRACE_MS: "10000"
+  LOG_LEVEL: "info"
+  CORS_ORIGINS: "https://app.saas.example.com"
+  ENABLE_SWAGGER: "false"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker-config
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/component: queue-consumer
+data:
+  NODE_ENV: "production"
+  SERVICE_NAME: "worker"
+  HOST: "0.0.0.0"
+  METRICS_PORT: "9465"
+  QUEUE_DRIVER: "bullmq"
+  QUEUE_NAME_PREFIX: "saas"
+  # CONCURRENCY is the knob that trades worker throughput against shared-DB
+  # fairness: each in-flight job holds a pooled Postgres connection inside a
+  # SET LOCAL tenant transaction. The noisy-neighbour load test exists to keep
+  # this number honest.
+  CONCURRENCY: "4"
+  RELAY_INTERVAL_MS: "250"
+  RELAY_BATCH_SIZE: "50"
+  LEASE_SECONDS: "120"
+  DLQ_RETENTION_HOURS: "168"
+  PG_POOL_MAX: "10"
+  PG_STATEMENT_TIMEOUT_MS: "120000"
+  REPORT_MAX_ROWS: "50000"
+  SHUTDOWN_GRACE_MS: "30000"
+  LOG_LEVEL: "info"

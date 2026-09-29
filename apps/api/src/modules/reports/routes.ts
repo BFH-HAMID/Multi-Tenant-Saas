@@ -56,7 +56,7 @@ export function reportRoutes(app: FastifyInstance): void {
 
       const accepted = await app.db.withTenant(
         { tenantId: tenant.id, userId: req.auth!.userId },
-        async (tx) => {
+        async (tx, txScope) => {
           // Capacity is checked *inside* the transaction, on the same snapshot the
           // insert happens on: a free workspace may have at most N reports in
           // flight, and a read-then-insert outside the tx would let a burst of
@@ -96,7 +96,10 @@ export function reportRoutes(app: FastifyInstance): void {
             JSON.stringify({ format: body.format, projectId: id }),
           ]);
           // The outbox row is written in this transaction (queue/producer.ts): the
-          // job is durable exactly when the 202 becomes observable.
+          // job is durable exactly when the 202 becomes observable. The BullMQ
+          // fast-path publish is registered via `txScope` and runs only after
+          // COMMIT — publishing from inside the transaction would let a worker
+          // read this INSERT before it is visible and lose the job.
           await app.producer.report({
             tenantId: tenant.id,
             requestedBy: req.auth!.userId,
@@ -108,6 +111,7 @@ export function reportRoutes(app: FastifyInstance): void {
               includeArchived: body.includeArchived,
             },
             tx,
+            txScope,
           });
           return { jobId };
         },

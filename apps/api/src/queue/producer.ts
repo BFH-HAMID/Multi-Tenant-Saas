@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Queue } from 'bullmq';
 import { JOBS, QUEUES, QUEUE_DEFAULTS, jobIdFor, queueForJob, type JobName } from '@saas/shared';
-import type { Database } from '@saas/db';
+import type { Database, TransactionScope } from '@saas/db';
 import type { AppConfig } from '../config/index.js';
 
 export interface EnqueueRequest {
@@ -10,8 +10,19 @@ export interface EnqueueRequest {
   payload: Record<string, unknown>;
   /** Dedupe identity: usually the HTTP Idempotency-Key or the resource id. */
   idempotencyKey: string;
-  /** When provided, the outbox row is written in this transaction. */
+  /**
+   * When provided, the outbox row is written in this transaction.
+   *
+   * Pass `txScope` together with `tx` — it is how the fast-path publish is
+   * deferred to after COMMIT. Publishing inside the transaction is a dual-write
+   * in disguise: the broker would make the job visible before the row it
+   * describes exists, and a consumer that reads "row not found" as success
+   * loses the job silently (this is not hypothetical — it lost ~14% of report
+   * jobs before the fix). Without `txScope` the enqueue is outbox-only, which
+   * is always safe: the relay delivers it.
+   */
   tx?: { query: (sql: string, params?: readonly unknown[]) => Promise<unknown> };
+  txScope?: Pick<TransactionScope, 'afterCommit'>;
   delayMs?: number;
 }
 
@@ -27,8 +38,10 @@ export interface EnqueueResult {
  *
  *   1. INSERT INTO outbox … (same transaction as the business write) → the job
  *      is durable the moment the HTTP 2xx is durable;
- *   2. best-effort BullMQ add() right away, so a healthy queue means ~0 extra
- *      latency instead of up to one relay tick;
+ *   2. best-effort BullMQ add() immediately *after COMMIT* (never inside the
+ *      transaction — the broker must not become aware of a job before the row
+ *      it describes is visible), so a healthy queue means ~0 extra latency
+ *      instead of up to one relay tick;
  *   3. if (2) fails, nothing is lost: the worker's relay (FOR UPDATE SKIP
  *      LOCKED) publishes it with backoff.
  *
@@ -65,14 +78,26 @@ export class QueueProducer {
         );
         return;
       }
-      this.queues.set(name, new Queue(this.prefixed(name), { connection, ...QUEUE_DEFAULTS }));
+      // BullMQ builds its Redis keys as `{prefix}:{queue}:{…}`. The prefix must
+      // be passed as an option — baking it into the name throws ("Queue name
+      // cannot contain :") and would silently fork the queue from the one the
+      // worker consumes if it ever did not. The worker passes the same option.
+      this.queues.set(
+        name,
+        new Queue(name, {
+          connection,
+          prefix: this.cfg.env.QUEUE_NAME_PREFIX,
+          ...QUEUE_DEFAULTS,
+        }),
+      );
     }
     this.bullAvailable = true;
     this.log.info({ queues: [...this.queues.keys()] }, 'bullmq producers ready');
   }
 
-  prefixed(name: string): string {
-    return `${this.cfg.env.QUEUE_NAME_PREFIX}:${name}`;
+  /** BullMQ key namespace shared with the worker ({@see QUEUES}). */
+  queuePrefix(): string {
+    return this.cfg.env.QUEUE_NAME_PREFIX;
   }
 
   async enqueue(req: EnqueueRequest): Promise<EnqueueResult> {
@@ -98,56 +123,85 @@ export class QueueProducer {
       // write, which is the entire point of the pattern.
       const res = (await req.tx.query(sql, params)) as { rows?: Array<{ id: string | number }> };
       outboxRowId = String(res?.rows?.[0]?.id ?? '') || null;
-    } else {
-      // No tx (e.g. a post-commit notification like a welcome email): still run
-      // inside the tenant's transaction, because `outbox` is RLS-protected and a
-      // bare pool query would have no `app.tenant_id` to satisfy WITH CHECK.
-      const res = await this.db.withTenant({ tenantId: req.tenantId }, (tx) =>
-        tx.query<{ id: string | number }>(sql, params),
-      );
-      outboxRowId = String(res.rows[0]?.id ?? '') || null;
-    }
-
-    // Fast path: publish now, but never fail the request if the broker is down.
-    if (this.bullAvailable) {
-      try {
-        const queue = this.queues.get(queueName);
-        if (queue) {
-          await queue.add(req.job, payload, {
-            jobId,
-            delay: req.delayMs,
-            // Consumer-side idempotency is the real guarantee; this only keeps
-            // the *queue* from holding two copies of the same logical job.
-            attempts:
-              req.job === JOBS.reportGenerate
-                ? QUEUE_DEFAULTS.attempts
-                : QUEUE_DEFAULTS.attempts + 1,
-            backoff: QUEUE_DEFAULTS.backoff,
-            removeOnComplete: QUEUE_DEFAULTS.removeOnComplete,
-            removeOnFail: QUEUE_DEFAULTS.removeOnFail,
-          });
-          // The broker owns delivery now: settle the ledger row so the relay does
-          // not re-dispatch work that is already queued. If this best-effort mark
-          // fails, the relay will claim the row later and `dispatch()`'s job claim
-          // turns the duplicate into a no-op — which is why marking *after* a
-          // successful add (never before) is safe, and marking before is not.
-          if (outboxRowId) {
-            await this.db
-              .query('SELECT app.outbox_mark_published(ARRAY[$1]::bigint[])', [outboxRowId])
-              .catch((err: unknown) =>
-                this.log.debug({ err: String(err) }, 'outbox settle after publish failed'),
-              );
-          }
-          return { jobId, via: 'bullmq' };
-        }
-      } catch (err) {
-        this.log.debug(
-          { err: String(err), jobId, queue: queueName },
-          'immediate publish failed; the outbox relay will retry it',
+      if (req.txScope) {
+        // Fast path, deferred until the row is actually visible: the publish
+        // (and its outbox settle) may only run once COMMIT returned. If the
+        // transaction rolls back, neither runs — no phantom job, no settle of
+        // a row that does not exist.
+        req.txScope.afterCommit(() =>
+          this.publishFastPath(queueName, req, payload, jobId, outboxRowId),
         );
+        return { jobId, via: 'bullmq' };
       }
+      // No scope (legacy caller): outbox-only is the safe default — the relay
+      // will deliver it a tick later.
+      return { jobId, via: 'outbox' };
     }
-    return { jobId, via: 'outbox' };
+    // No tx (e.g. a post-commit notification like a welcome email): the row is
+    // committed by the withTenant below, so publishing right after it is safe.
+    // Still run inside the tenant's transaction, because `outbox` is
+    // RLS-protected and a bare pool query would have no `app.tenant_id` to
+    // satisfy WITH CHECK.
+    const res = await this.db.withTenant({ tenantId: req.tenantId }, (tx) =>
+      tx.query<{ id: string | number }>(sql, params),
+    );
+    outboxRowId = String(res.rows[0]?.id ?? '') || null;
+    const via = await this.publishFastPath(queueName, req, payload, jobId, outboxRowId);
+    return { jobId, via };
+  }
+
+  /**
+   * Best-effort BullMQ publish, plus the outbox settle that must follow it.
+   * Returns `'bullmq'` when the job reached the broker, `'outbox'` otherwise —
+   * never throws, because a broker blip must not fail an already-committed
+   * business write: the relay is the safety net for exactly that case.
+   */
+  private async publishFastPath(
+    queueName: string,
+    req: EnqueueRequest,
+    payload: Record<string, unknown>,
+    jobId: string,
+    outboxRowId: string | null,
+  ): Promise<'bullmq' | 'outbox'> {
+    if (!this.bullAvailable) {
+      return 'outbox';
+    }
+    try {
+      const queue = this.queues.get(queueName);
+      if (!queue) {
+        return 'outbox';
+      }
+      await queue.add(req.job, payload, {
+        jobId,
+        delay: req.delayMs,
+        // Consumer-side idempotency is the real guarantee; this only keeps
+        // the *queue* from holding two copies of the same logical job.
+        attempts:
+          req.job === JOBS.reportGenerate ? QUEUE_DEFAULTS.attempts : QUEUE_DEFAULTS.attempts + 1,
+        backoff: QUEUE_DEFAULTS.backoff,
+        removeOnComplete: QUEUE_DEFAULTS.removeOnComplete,
+        removeOnFail: QUEUE_DEFAULTS.removeOnFail,
+      });
+      // The broker owns delivery now: settle the ledger row so the relay does
+      // not re-dispatch work that is already queued. If this best-effort mark
+      // fails, the relay will claim the row later and `dispatch()`'s job claim
+      // turns the duplicate into a no-op — which is why marking *after* a
+      // successful add (never before) is safe, and marking before is not.
+      if (outboxRowId) {
+        await this.db
+          .query('SELECT app.outbox_mark_published(ARRAY[$1]::bigint[])', [outboxRowId])
+          .catch((err: unknown) =>
+            this.log.debug({ err: String(err) }, 'outbox settle after publish failed'),
+          );
+      }
+      return 'bullmq';
+    } catch (err) {
+      this.log.debug(
+        { err: String(err), jobId, queue: queueName },
+        'immediate publish failed; the outbox relay will retry it',
+      );
+      return 'outbox';
+    }
   }
 
   async welcomeEmail(input: {
@@ -157,6 +211,7 @@ export class QueueProducer {
     email: string;
     displayName: string | null;
     tx?: EnqueueRequest['tx'];
+    txScope?: EnqueueRequest['txScope'];
   }): Promise<EnqueueResult> {
     return this.enqueue({
       tenantId: input.tenantId,
@@ -171,6 +226,7 @@ export class QueueProducer {
         requestedAt: new Date().toISOString(),
       },
       tx: input.tx,
+      txScope: input.txScope,
     });
   }
 
@@ -181,6 +237,7 @@ export class QueueProducer {
     inviteToken: string;
     invitedBy: string;
     tx?: EnqueueRequest['tx'];
+    txScope?: EnqueueRequest['txScope'];
   }): Promise<EnqueueResult> {
     return this.enqueue({
       tenantId: input.tenantId,
@@ -195,6 +252,7 @@ export class QueueProducer {
         requestedAt: new Date().toISOString(),
       },
       tx: input.tx,
+      txScope: input.txScope,
     });
   }
 
@@ -205,6 +263,7 @@ export class QueueProducer {
     options: Record<string, unknown>;
     idempotencyKey?: string;
     tx?: EnqueueRequest['tx'];
+    txScope?: EnqueueRequest['txScope'];
   }): Promise<EnqueueResult> {
     return this.enqueue({
       tenantId: input.tenantId,
@@ -218,6 +277,7 @@ export class QueueProducer {
         requestedAt: new Date().toISOString(),
       },
       tx: input.tx,
+      txScope: input.txScope,
     });
   }
 

@@ -1,0 +1,206 @@
+# CD — build once, deploy the same digest everywhere, migrate before the
+# rollout.
+#
+#   1. images    build & push api + worker to GHCR (tagged with the git SHA and
+#                the semver, when the ref is a tag), provenance attached
+#   2. deploy    (only when a KUBE_CONFIG secret is configured) renders the
+#                prod overlay pinned to that digest, runs the migrate Job and
+#                WAITS for it, then applies the Deployments and watches the
+#                rollout. If the cluster secret is absent the job says so and
+#                exits successfully — a repo that cannot deploy should still
+#                build its images.
+#
+# Migrations run as a Job (see infra/k8s/base/migrate-job.yaml) *before* the
+# new pods exist, as the admin role: the app role cannot ALTER TABLE by design.
+# The Job object is immutable, so CD deletes the previous run first.
+name: CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false # never two rollouts racing
+
+env:
+  NODE_VERSION: "22"
+
+permissions:
+  contents: read
+  packages: write
+  # Provenance attestations for the pushed images.
+  id-token: write
+  attestations: write
+
+jobs:
+  images:
+    name: build & push images (GHCR)
+    runs-on: ubuntu-latest
+    outputs:
+      image_api: ${{ steps.names.outputs.api }}
+      image_worker: ${{ steps.names.outputs.worker }}
+      digest_api: ${{ steps.build-api.outputs.digest }}
+      digest_worker: ${{ steps.build-worker.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR requires lowercase repository names; GitHub repos can contain
+      # uppercase, so the name is computed once, lowercased.
+      - name: Compute image names
+        id: names
+        run: |
+          repo="${GITHUB_REPOSITORY,,}"
+          echo "api=ghcr.io/${repo}/api"     >> "$GITHUB_OUTPUT"
+          echo "worker=ghcr.io/${repo}/worker" >> "$GITHUB_OUTPUT"
+          echo "repo=ghcr.io/${repo}"        >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (api)
+        id: meta-api
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.names.outputs.api }}
+          tags: |
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & push API image
+        id: build-api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          tags: ${{ steps.meta-api.outputs.tags }}
+          labels: ${{ steps.meta-api.outputs.labels }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+            BUILD_VERSION=${{ steps.meta-api.outputs.version }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+
+      - name: Docker metadata (worker)
+        id: meta-worker
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.names.outputs.worker }}
+          tags: |
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & push worker image
+        id: build-worker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/worker/Dockerfile
+          push: true
+          tags: ${{ steps.meta-worker.outputs.tags }}
+          labels: ${{ steps.meta-worker.outputs.labels }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+            BUILD_VERSION=${{ steps.meta-worker.outputs.version }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,scope=worker,mode=max
+
+      - name: Attest image provenance (api)
+        uses: actions/attest-build-provenance@v2
+        continue-on-error: true
+        with:
+          subject-name: ${{ steps.names.outputs.api }}
+          subject-digest: ${{ steps.build-api.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest image provenance (worker)
+        uses: actions/attest-build-provenance@v2
+        continue-on-error: true
+        with:
+          subject-name: ${{ steps.names.outputs.worker }}
+          subject-digest: ${{ steps.build-worker.outputs.digest }}
+          push-to-registry: true
+
+  deploy:
+    name: deploy (kustomize, migrate first)
+    runs-on: ubuntu-latest
+    needs: images
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      # Secrets cannot be referenced in a job-level `if`, so presence is probed
+      # here and every later step gates on it. Without a cluster configured the
+      # job is a no-op that says why — CI stays green on forks.
+      - name: Check for cluster credentials
+        id: creds
+        run: |
+          if [ -z "${{ secrets.KUBE_CONFIG }}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::KUBE_CONFIG secret not set — skipping deploy (images were still built and pushed)."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up kubeconfig
+        if: steps.creds.outputs.configured == 'true'
+        run: |
+          mkdir -p "$HOME/.kube"
+          printf '%s' "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Pin the overlay to the pushed images & render
+        if: steps.creds.outputs.configured == 'true'
+        working-directory: infra/k8s/overlays/prod
+        run: |
+          # Digest-pinning (not tag-pinning) is the point: `latest` could move
+          # between build and apply, and a rollout that does not know what it
+          # rolled out cannot be rolled back.
+          kubectl kustomize edit set image \
+            "saas/api=${{ needs.images.outputs.image_api }}@${{ needs.images.outputs.digest_api }}" \
+            "saas/worker=${{ needs.images.outputs.image_worker }}@${{ needs.images.outputs.digest_worker }}"
+          cd ../../..
+          kubectl kustomize infra/k8s/overlays/prod > /tmp/prod-rendered.yaml
+          echo "--- rendered $(grep -c '^kind:' /tmp/prod-rendered.yaml) objects"
+
+      - name: Migrate (Job runs to completion before any new pod starts)
+        if: steps.creds.outputs.configured == 'true'
+        run: |
+          # The Job object is immutable: clear the previous run, apply only the
+          # migrate object from the rendered set, wait for it to finish.
+          kubectl -n saas-prod delete job prod-migrate --ignore-not-found
+          kubectl apply -f /tmp/prod-rendered.yaml -l app.kubernetes.io/name=migrate
+          kubectl -n saas-prod wait --for=condition=complete job/prod-migrate --timeout=300s
+
+      - name: Apply the rest of the overlay
+        if: steps.creds.outputs.configured == 'true'
+        run: |
+          kubectl apply -f /tmp/prod-rendered.yaml
+
+      - name: Watch the rollout
+        if: steps.creds.outputs.configured == 'true'
+        run: |
+          kubectl -n saas-prod rollout status deploy/prod-api   --timeout=300s
+          kubectl -n saas-prod rollout status deploy/prod-worker --timeout=300s
+
+      - name: Post-deploy smoke (through the cluster)
+        if: steps.creds.outputs.configured == 'true'
+        run: |
+          # /v1/health is public and shallow — the right check for "did the
+          # rollout produce a serving fleet" (deep checks are Prometheus' job).
+          kubectl -n saas-prod run smoke-$RANDOM --rm -i --restart=Never \
+            --image=curlimages/curl:8.10.1 --command -- \
+            curl -fsS --max-time 10 http://prod-api/v1/health

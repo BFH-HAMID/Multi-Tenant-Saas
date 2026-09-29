@@ -1,0 +1,286 @@
+# CI — the same gates a contributor runs locally (see Makefile), in the order
+# that fails fastest:
+#
+#   1. lint-test       eslint + tsc project build + unit tests (no services)
+#   2. integration     Postgres + Redis service containers; RLS/quota/auth
+#                      behaviour against real engines (skipped-by-env locally,
+#                      never skipped here)
+#   3. k8s-render      `kubectl kustomize` both overlays — manifests are code
+#   4. docker-build    both images build (no push)
+#   5. compose-smoke   the whole lab boots (pg, redis×2, api, worker, nginx,
+#                      prometheus, grafana) and both load runners pass their
+#                      thresholds against it — the "it actually works" job
+#
+# The k6 scripts in loadtests/*.js are generated from the JSON configs, so CI
+# also regenerates and diffs them: a hand-edit that drifts from the config it
+# claims to translate fails the build instead of measuring something else.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  lint-test:
+    name: lint, typecheck, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Typecheck + build (project references)
+        run: npm run build
+
+      - name: Typecheck tests (separate tsconfigs, stricter than the build)
+        run: npm run typecheck:tests
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Generated k6 scripts are in sync with their configs
+        run: |
+          node tools/loadgen/loadgen.mjs --config loadtests/smoke.config.json      --emit-k6 /tmp/smoke.js --no-run
+          node tools/loadgen/loadgen.mjs --config loadtests/load.config.json       --emit-k6 /tmp/load.js  --no-run
+          node tools/loadgen/loadgen.mjs --config loadtests/isolation.config.json  --emit-k6 /tmp/tenant-isolation.js --no-run
+          for f in smoke load tenant-isolation; do
+            if ! diff -u "loadtests/$f.js" "/tmp/$f.js" > "/tmp/$f.diff"; then
+              echo "::error::loadtests/$f.js is out of sync with its config. Regenerate with:"
+              echo "  make load-regen"
+              cat "/tmp/$f.diff"
+              exit 1
+            fi
+          done
+
+  integration:
+    name: integration tests (real Postgres + Redis)
+    runs-on: ubuntu-latest
+    needs: lint-test
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: saas
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d saas"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis-cache:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 2s
+          --health-retries 10
+      redis-queue:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 2s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://app_user:app_user@localhost:5432/saas
+      DATABASE_URL_ADMIN: postgres://postgres:postgres@localhost:5432/saas
+      APP_USER_PASSWORD: app_user
+      REDIS_CACHE_URL: redis://localhost:6379/0
+      REDIS_QUEUE_URL: redis://localhost:6380/0
+      JWT_SECRET: ci-integration-secret-not-for-production-use
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+
+      # The db CLI (tsx db/src/cli.ts) and the integration tests import
+      # @saas/shared through its package exports, which point at dist/ —
+      # npm ci alone does not produce it.
+      - name: Build workspaces
+        run: npm run build
+
+      # The runtime role does not exist yet on a fresh service container, and
+      # the CLI's wait-loop pings the admin URL — so bootstrap with the admin
+      # URL (--wait 0 skips that ping), then rebuild/migrate/seed.
+      # On failure the tail is re-emitted as ::error:: annotations so the cause
+      # is visible inline (and via the API) without downloading raw logs.
+      - name: Bootstrap roles, migrate, seed
+        run: |
+          set -o pipefail
+          if ! { DATABASE_URL="$DATABASE_URL_ADMIN" npx tsx db/src/cli.ts bootstrap --wait 0 && \
+                 npm run -w @saas/db rebuild; } 2>&1 | tee /tmp/bootstrap.log; then
+            tail -n 10 /tmp/bootstrap.log | sed 's/^/::error::/'
+            exit 1
+          fi
+
+      - name: Integration tests
+        run: npm run test:integration
+
+  k8s-render:
+    name: kustomize renders (base + overlays)
+    runs-on: ubuntu-latest
+    needs: lint-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render dev overlay
+        run: |
+          if ! kubectl kustomize infra/k8s/overlays/dev > /dev/null 2>/tmp/kust-dev.log; then
+            tail -n 10 /tmp/kust-dev.log | sed 's/^/::error::/'
+            exit 1
+          fi
+      - name: Render prod overlay
+        run: |
+          if ! kubectl kustomize infra/k8s/overlays/prod > /dev/null 2>/tmp/kust-prod.log; then
+            tail -n 10 /tmp/kust-prod.log | sed 's/^/::error::/'
+            exit 1
+          fi
+      - name: Show prod manifest (reviewable artifact)
+        run: kubectl kustomize infra/k8s/overlays/prod
+
+  docker-build:
+    name: docker images build
+    runs-on: ubuntu-latest
+    needs: lint-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: false
+          tags: saas/api:ci
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+      - name: Build worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/worker/Dockerfile
+          push: false
+          tags: saas/worker:ci
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,scope=worker,mode=max
+
+  compose-smoke:
+    # The full lab, exactly as a laptop runs it: `docker compose up --build`,
+    # then the load tests through the edge (nginx), not the pod port. Both the
+    # dependency-free Node runner and k6 itself run against the same stack, so
+    # the emitted k6 scripts are executed, not just linted.
+    name: compose stack + load smoke (node runner & k6)
+    runs-on: ubuntu-latest
+    needs: docker-build
+    timeout-minutes: 20
+    env:
+      POSTGRES_PASSWORD: ci-postgres
+      APP_USER_PASSWORD: ci-app-user
+      JWT_SECRET: ci-compose-secret-not-for-production-use
+      INTERNAL_SECRET: ci-internal-secret-not-for-prod
+      GRAFANA_PASSWORD: ci-grafana
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Write compose .env
+        run: |
+          cd infra/compose
+          cat > .env <<EOF
+          POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+          APP_USER_PASSWORD=$APP_USER_PASSWORD
+          JWT_SECRET=$JWT_SECRET
+          INTERNAL_SECRET=$INTERNAL_SECRET
+          GRAFANA_PASSWORD=$GRAFANA_PASSWORD
+          BUILD_SHA=${{ github.sha }}
+          BUILD_VERSION=ci-${{ github.run_number }}
+          EOF
+
+      - name: Build and start the lab (migrations + seed included)
+        run: |
+          set -o pipefail
+          if ! docker compose -f infra/compose/docker-compose.yml up -d --build 2>&1 | tee /tmp/compose-up.log; then
+            # The one-shot migrate service is the usual culprit on a cold
+            # cluster; surface its own logs, not just compose's summary.
+            docker compose -f infra/compose/docker-compose.yml logs --tail=10 migrate 2>&1 | sed 's/^/::error::/' || true
+            tail -n 10 /tmp/compose-up.log | sed 's/^/::error::/'
+            exit 1
+          fi
+
+      - name: Wait for the API to be ready (through the edge)
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/v1/health > /dev/null 2>&1; then
+              echo "api ready after ${i}s"; exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::API did not become ready"; docker compose -f infra/compose/docker-compose.yml ps; exit 1
+
+      - name: Node load runner — smoke thresholds
+        run: node tools/loadgen/loadgen.mjs --config loadtests/smoke.config.json --base-url http://localhost:8080
+
+      # The capacity thresholds include server-side floors (throttle %, cache
+      # hit ratio) read from the API's /metrics — an internal listener that is
+      # deliberately never published to the host. So this run goes through the
+      # compose `load` service, inside the network. It targets the API directly
+      # (api:3000), not nginx: the edge's per-IP flood brake (25 r/s) would eat
+      # ~all of a single-IP generator's traffic, and the thresholds assert app
+      # behavior — the same methodology as the numbers in ARCHITECTURE.md.
+      # 20s to keep the job quick.
+      - name: Node load runner — capacity thresholds
+        run: |
+          set -o pipefail
+          if ! docker compose -f infra/compose/docker-compose.yml run --rm \
+               -e LOAD_CONFIG=/work/loadtests/load.config.json -e DURATION=20s load 2>&1 | tee /tmp/capacity.log; then
+            tail -n 40 /tmp/capacity.log | sed 's/^/::error::/'
+            exit 1
+          fi
+
+      - name: k6 — smoke.js (same experiment, k6 runtime)
+        run: |
+          docker run --rm --network saas_internal \
+            -e BASE_URL=http://nginx \
+            -v "$PWD/loadtests:/loadtests:ro" \
+            -u 1000:1000 \
+            grafana/k6:0.57.0 run /loadtests/smoke.js
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f infra/compose/docker-compose.yml logs --tail=120 api worker migrate
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f infra/compose/docker-compose.yml down -v --remove-orphans

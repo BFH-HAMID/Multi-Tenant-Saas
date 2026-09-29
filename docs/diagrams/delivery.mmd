@@ -1,0 +1,39 @@
+%% Async work: how a POST becomes a completed job (and what happens when
+%% things fail at every point). At-least-once is the contract; idempotency
+%% claims make redelivery harmless.
+sequenceDiagram
+    participant C as client
+    participant A as api
+    participant P as Postgres
+    participant R as redis-queue
+    participant W as worker
+
+    C->>A: POST /v1/projects/…/reports (Idempotency-Key)
+    A->>P: BEGIN
+    A->>P: INSERT report_jobs (pending)
+    A->>P: INSERT outbox (same tx — the job is durable when the 2xx is)
+    A->>P: COMMIT
+    A-->>R: best-effort BullMQ add (skip: relay catches it)
+    A-->>C: 202 { jobId, statusUrl }
+
+    Note over R,W: fast path: BullMQ delivers immediately
+    R->>W: job (at-least-once)
+    Note over W: claim: INSERT … ON CONFLICT (idempotency) DO NOTHING
+    alt claim won
+        W->>P: SET LOCAL app.tenant_id (RLS applies)
+        W->>P: UPDATE report_jobs → running → completed
+        W-->>R: ack
+    else claim lost (already done)
+        W-->>R: ack (no-op — redelivery is harmless)
+    else handler threw
+        W-->>R: retry with exponential backoff (3 attempts)
+        alt attempts exhausted
+            W->>R: add to dead-letter queue
+            Note over W: operator: /dlq lists, /dlq/replay re-enqueues<br/>(payload + idempotency key untouched)
+        end
+    end
+
+    Note over W: slow path: api died before the best-effort add
+    W->>P: relay tick: claim batch FOR UPDATE SKIP LOCKED
+    P-->>W: committed outbox rows (lease 120s)
+    W->>R: publish → settle

@@ -1,0 +1,68 @@
+# HPA for the API on CPU + memory, with the RPS signal documented below.
+#
+# CPU is the honest default here: the API is stateless and its hot path is
+# JSON ⇄ Postgres ⇄ Redis, so CPU saturates before sockets do at this scale.
+# Memory is a safety net (per-tenant caches are bounded, but a flood of large
+# list requests still moves the needle).
+#
+# RPS-based scaling (the "scale on load, not on CPU" story) needs the metrics
+# pipeline the overlay documents: prometheus-adapter (or KEDA) exposing
+# http_requests_total as a custom metric. It is deliberately NOT in the base:
+# a custom metric that silently stops being served turns an HPA into a fixed
+# replica count, which is worse than an honest CPU-only HPA. When the adapter
+# is installed cluster-wide, add:
+#
+#   - type: Pods
+#     pods:
+#       metric:
+#         name: http_requests_per_second
+#       target:
+#         type: AverageValue
+#         averageValue: "150"   # per pod, from the load test headroom numbers
+#
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: http-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      # Fast up: load arrives faster than humans react.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    scaleDown:
+      # Slow down: 5 minutes of quiet before shrinking, then 1 pod at a time —
+      # per-tenant token buckets are shared via Redis so shrinking is safe for
+      # fairness, but flapping replicas churn Postgres connections (pool warmup)
+      # and dashboards alike.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+      selectPolicy: Min

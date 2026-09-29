@@ -1,0 +1,70 @@
+# The edge. In the compose lab this is the hand-written nginx in
+# infra/nginx/saas-edge.conf; here it is ingress-nginx, and the annotations are
+# the same division of labour: coarse per-IP flood control at the edge, the
+# authoritative per-tenant token bucket in the app (which is the only place
+# that knows a tenant's plan).
+#
+# The wildcard host is the tenancy mechanism: `{slug}.saas.example.com` reaches
+# the same pods, and the tenant hook resolves the slug from the Host header
+# (TENANT_BASE_DOMAINS in api-config must list the base domain).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: http-api
+  annotations:
+    # Coarse per-IP brakes — deliberately looser than the app's plan buckets so
+    # a 429 from here is rare and visible as such (a request the edge rejects
+    # never enters ratelimit_decisions_total, and mixing the two is how a
+    # throttling graph becomes fiction).
+    nginx.ingress.kubernetes.io/limit-rps: "25"
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+    nginx.ingress.kubernetes.io/limit-await-connections: "true"
+    nginx.ingress.kubernetes.io/limit-status-code: "429"
+    # Bodies above MAX_BODY_BYTES (512 KiB in the app) are refused at 1 MiB —
+    # the window between is where the app answers with a structured 413.
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    # Matches the app's requestTimeout (30s) + headroom; a handler must be
+    # aborted by Node, not silently cut off mid-write by the proxy.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "35"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "35"
+    # The ingress is the only proxy in front of the pods; the app has
+    # TRUST_PROXY=true and trusts exactly this hop to set X-Forwarded-For.
+    nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Clients reconnect on rollout; no need to pin keepalives longer than the
+    # app's KEEP_ALIVE_TIMEOUT_MS (72s).
+    nginx.ingress.kubernetes.io/upstream-keepalive-timeout: "60"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.saas.example.com
+        - "*.saas.example.com"
+      secretName: saas-api-tls # cert-manager typically; dev overlay uses the same name
+  rules:
+    # Platform host (health, docs, /v1/plans, sign-in pages).
+    - host: api.saas.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80
+    # Tenant workspaces: {slug}.saas.example.com → same pods, tenant resolved
+    # from the Host header before any handler runs.
+    - host: "*.saas.example.com"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80

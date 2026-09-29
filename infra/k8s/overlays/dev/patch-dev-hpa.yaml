@@ -1,0 +1,10 @@
+# Dev does not autoscale (1 replica, min=max=1): an HPA fighting a
+# replica-count pin in a namespace nobody watches is how a dev cluster wakes up
+# with 6 pods. Keep it explicit.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+spec:
+  minReplicas: 1
+  maxReplicas: 2
