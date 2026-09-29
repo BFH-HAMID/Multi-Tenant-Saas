@@ -253,16 +253,19 @@ jobs:
         run: node tools/loadgen/loadgen.mjs --config loadtests/smoke.config.json --base-url http://localhost:8080
 
       # The capacity thresholds include server-side floors (throttle %, cache
-      # hit ratio) read from the API's /metrics — which is on the internal
-      # listener and deliberately NOT published to the host. So this run goes
-      # through the compose `load` service, inside the network: nginx edge,
-      # api:9464 for metrics, 20s to keep the job quick.
+      # hit ratio) read from the API's /metrics — an internal listener that is
+      # deliberately never published to the host. So this run goes through the
+      # compose `load` service, inside the network. It targets the API directly
+      # (api:3000), not nginx: the edge's per-IP flood brake (25 r/s) would eat
+      # ~all of a single-IP generator's traffic, and the thresholds assert app
+      # behavior — the same methodology as the numbers in ARCHITECTURE.md.
+      # 20s to keep the job quick.
       - name: Node load runner — capacity thresholds
         run: |
           set -o pipefail
           if ! docker compose -f infra/compose/docker-compose.yml run --rm \
                -e LOAD_CONFIG=/work/loadtests/load.config.json -e DURATION=20s load 2>&1 | tee /tmp/capacity.log; then
-            tail -n 25 /tmp/capacity.log | sed 's/^/::error::/'
+            tail -n 40 /tmp/capacity.log | sed 's/^/::error::/'
             exit 1
           fi
 

@@ -308,7 +308,15 @@ services:
     volumes:
       - ../..:/work:ro
     environment:
-      BASE_URL: http://nginx
+      # Direct to the API, not through nginx: the edge's anon_flood brake is
+      # per-IP (25 r/s + burst 50) and a load generator is one IP, so any
+      # meaningful volume through the edge is ~all edge-429s — the flood brake
+      # doing its job, not an app measurement. The app-level numbers this
+      # service exists to produce (plan buckets, cache hit ratio, throttle
+      # floor) are the same ones ARCHITECTURE.md reports, and those were
+      # measured against the API directly. Override BASE_URL=http://nginx for a
+      # low-volume pass through the edge (smoke-sized; the burst absorbs it).
+      BASE_URL: http://api:3000
       LOAD_CONFIG: /work/loadtests/smoke.config.json
       # /metrics lives on the API's internal listener and is never published
       # to the host — from inside the network it is api:9464. Server-side
