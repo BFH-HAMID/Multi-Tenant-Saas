@@ -58,7 +58,11 @@ async function makeTenant(): Promise<{ tenantId: string; userId: string }> {
       'owner',
     ],
   );
-  const { o_tenant_id: tenantId, o_user_id: userId } = rows.rows[0];
+  const row = rows.rows[0];
+  if (!row) {
+    throw new Error('register_tenant returned no row');
+  }
+  const { o_tenant_id: tenantId, o_user_id: userId } = row;
   created.push({ tenantId, userId });
   return { tenantId, userId };
 }
