@@ -24,9 +24,11 @@ images:
     newName: ghcr.io/bfh-hamid/multi-tenant-saas/worker
     newTag: latest
 patches:
+  # Multi-document patch files self-target by their own apiVersion/kind/name
+  # (api → api, worker → worker). No `target:` block: a target requires a
+  # single-document patch that matches exactly one resource, and `kind:
+  # Deployment` alone matches two.
   - path: patch-replicas.yaml
-    target:
-      kind: Deployment
   - path: patch-prod-api.yaml
   - path: patch-prod-worker.yaml
   - path: patch-prod-hpa.yaml

@@ -126,10 +126,16 @@ jobs:
       # The runtime role does not exist yet on a fresh service container, and
       # the CLI's wait-loop pings DATABASE_URL first — so bootstrap with the
       # admin URL (--wait 0 skips that ping), then rebuild/migrate/seed.
+      # On failure the tail is re-emitted as ::error:: annotations so the cause
+      # is visible inline (and via the API) without downloading raw logs.
       - name: Bootstrap roles, migrate, seed
         run: |
-          DATABASE_URL="$DATABASE_URL_ADMIN" npx tsx db/src/cli.ts bootstrap --wait 0
-          npm run -w @saas/db rebuild
+          set -o pipefail
+          if ! { DATABASE_URL="$DATABASE_URL_ADMIN" npx tsx db/src/cli.ts bootstrap --wait 0 && \
+                 npm run -w @saas/db rebuild; } 2>&1 | tee /tmp/bootstrap.log; then
+            tail -n 10 /tmp/bootstrap.log | sed 's/^/::error::/'
+            exit 1
+          fi
 
       - name: Integration tests
         run: npm run test:integration
@@ -141,9 +147,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Render dev overlay
-        run: kubectl kustomize infra/k8s/overlays/dev > /dev/null
+        run: |
+          if ! kubectl kustomize infra/k8s/overlays/dev > /dev/null 2>/tmp/kust-dev.log; then
+            tail -n 10 /tmp/kust-dev.log | sed 's/^/::error::/'
+            exit 1
+          fi
       - name: Render prod overlay
-        run: kubectl kustomize infra/k8s/overlays/prod > /dev/null
+        run: |
+          if ! kubectl kustomize infra/k8s/overlays/prod > /dev/null 2>/tmp/kust-prod.log; then
+            tail -n 10 /tmp/kust-prod.log | sed 's/^/::error::/'
+            exit 1
+          fi
       - name: Show prod manifest (reviewable artifact)
         run: kubectl kustomize infra/k8s/overlays/prod
 
@@ -209,7 +223,12 @@ jobs:
           EOF
 
       - name: Build and start the lab (migrations + seed included)
-        run: docker compose -f infra/compose/docker-compose.yml up -d --build
+        run: |
+          set -o pipefail
+          if ! docker compose -f infra/compose/docker-compose.yml up -d --build 2>&1 | tee /tmp/compose-up.log; then
+            tail -n 10 /tmp/compose-up.log | sed 's/^/::error::/'
+            exit 1
+          fi
 
       - name: Wait for the API to be ready (through the edge)
         run: |
