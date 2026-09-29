@@ -123,9 +123,15 @@ jobs:
           cache: npm
       - run: npm ci
 
+      # The db CLI (tsx db/src/cli.ts) and the integration tests import
+      # @saas/shared through its package exports, which point at dist/ —
+      # npm ci alone does not produce it.
+      - name: Build workspaces
+        run: npm run build
+
       # The runtime role does not exist yet on a fresh service container, and
-      # the CLI's wait-loop pings DATABASE_URL first — so bootstrap with the
-      # admin URL (--wait 0 skips that ping), then rebuild/migrate/seed.
+      # the CLI's wait-loop pings the admin URL — so bootstrap with the admin
+      # URL (--wait 0 skips that ping), then rebuild/migrate/seed.
       # On failure the tail is re-emitted as ::error:: annotations so the cause
       # is visible inline (and via the API) without downloading raw logs.
       - name: Bootstrap roles, migrate, seed
@@ -226,6 +232,9 @@ jobs:
         run: |
           set -o pipefail
           if ! docker compose -f infra/compose/docker-compose.yml up -d --build 2>&1 | tee /tmp/compose-up.log; then
+            # The one-shot migrate service is the usual culprit on a cold
+            # cluster; surface its own logs, not just compose's summary.
+            docker compose -f infra/compose/docker-compose.yml logs --tail=10 migrate 2>&1 | sed 's/^/::error::/' || true
             tail -n 10 /tmp/compose-up.log | sed 's/^/::error::/'
             exit 1
           fi

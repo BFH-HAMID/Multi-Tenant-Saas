@@ -105,11 +105,30 @@ async function main(): Promise<void> {
   const adminUrl = env.DATABASE_URL_ADMIN ?? env.DATABASE_URL;
 
   if (Number(values.wait) > 0) {
-    await waitForPostgres(env.DATABASE_URL, Number(values.wait), log);
+    // Ping as the ADMIN role, not the app role: on a fresh cluster `app_user`
+    // does not exist yet (it is created below/by bootstrap), so pinging
+    // DATABASE_URL turns "first boot" into SQLSTATE 28000 and an instant,
+    // confusing failure. The admin role is the one the migrations use anyway.
+    await waitForPostgres(adminUrl, Number(values.wait), log);
   }
 
   switch (positionals[0]) {
     case 'migrate': {
+      // Fresh clusters reach this command through the compose `migrate`
+      // service and the k8s migrate Job — the only things that run before the
+      // app starts. 0000 creates `app_user` NOLOGIN; something must flip it to
+      // LOGIN before the API can connect, and this is the only step that
+      // exists on both paths. Do it only when the caller provided the dev/CI
+      // app-role password: a production cluster that provisions roles
+      // out-of-band (see db/src/bootstrap.ts) must not have its passwords
+      // rewritten by a migration command.
+      if (process.env.APP_USER_PASSWORD !== undefined) {
+        await ensureLoginRoles({
+          adminUrl,
+          appUserPassword: process.env.APP_USER_PASSWORD,
+          log: (msg, meta) => log.info(meta ?? {}, msg),
+        });
+      }
       const res = await migrate({
         url: adminUrl,
         dir,
