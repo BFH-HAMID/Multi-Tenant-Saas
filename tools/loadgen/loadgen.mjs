@@ -60,9 +60,12 @@ if (args.noRun) {
   process.exit(0);
 }
 
-const baseUrl = args.baseUrl ?? cfg.baseUrl ?? 'http://127.0.0.1:3000';
-const metricsUrl = args.metricsUrl ?? cfg.metricsUrl ?? 'http://127.0.0.1:9464/metrics';
-const durationMs = parseDuration(args.duration ?? String(cfg.duration ?? '30s'));
+const baseUrl = args.baseUrl ?? process.env.BASE_URL ?? cfg.baseUrl ?? 'http://127.0.0.1:3000';
+const metricsUrl =
+  args.metricsUrl ?? process.env.METRICS_URL ?? cfg.metricsUrl ?? 'http://127.0.0.1:9464/metrics';
+const durationMs = parseDuration(
+  args.duration ?? process.env.DURATION ?? String(cfg.duration ?? '30s'),
+);
 const rampMs = parseDuration(String(cfg.rampUp ?? '2s'));
 const seedPassword = cfg.seedPassword ?? 'Seed-Passw0rd-2026!';
 const startedAt = new Date();
@@ -1037,6 +1040,12 @@ function usage() {
   node tools/loadgen/loadgen.mjs --config loadtests/load.config.json
        [--base-url URL] [--metrics-url URL] [--duration 30s]
        [--out results.json] [--emit-k6 loadtests/generated.js] [--no-run]
+
+  Precedence: CLI flags > environment > config file > defaults. The env names
+  (BASE_URL, METRICS_URL, DURATION) exist for the compose \`load\` service: it
+  runs inside the compose network where the config's localhost defaults are
+  wrong (the API's metrics port is never published to the host), so the service
+  points them at api:9464 / nginx instead.
 
 Config keys: baseUrl, metricsUrl, vus, duration, rampUp, thinkMs, slugPrefix,
 seedProjects, tenants[{count,plan|useSeed,user,password}], victims[labels],

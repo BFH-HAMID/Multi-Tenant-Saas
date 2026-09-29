@@ -252,8 +252,19 @@ jobs:
       - name: Node load runner — smoke thresholds
         run: node tools/loadgen/loadgen.mjs --config loadtests/smoke.config.json --base-url http://localhost:8080
 
+      # The capacity thresholds include server-side floors (throttle %, cache
+      # hit ratio) read from the API's /metrics — which is on the internal
+      # listener and deliberately NOT published to the host. So this run goes
+      # through the compose `load` service, inside the network: nginx edge,
+      # api:9464 for metrics, 20s to keep the job quick.
       - name: Node load runner — capacity thresholds
-        run: node tools/loadgen/loadgen.mjs --config loadtests/load.config.json --base-url http://localhost:8080 --duration 20s
+        run: |
+          set -o pipefail
+          if ! docker compose -f infra/compose/docker-compose.yml run --rm \
+               -e LOAD_CONFIG=/work/loadtests/load.config.json -e DURATION=20s load 2>&1 | tee /tmp/capacity.log; then
+            tail -n 25 /tmp/capacity.log | sed 's/^/::error::/'
+            exit 1
+          fi
 
       - name: k6 — smoke.js (same experiment, k6 runtime)
         run: |
