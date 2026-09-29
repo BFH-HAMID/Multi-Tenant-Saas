@@ -214,6 +214,59 @@ describe('claim handling', () => {
     // as "same key, different payload".
     expect(hashB).toBe(hashA);
   });
+
+  // The regression behind these two specs: a report handler that could not yet
+  // see its row (the enqueue transaction had not committed when the BullMQ
+  // fast path delivered the job) used to return `skipped`, which dispatch
+  // counted as `completed` and settled the idempotency claim — so the outbox
+  // relay later saw "replay" and the job was never run at all. ~14% of report
+  // jobs were lost this way, with every metric green.
+  it('treats a not-yet-visible report row as a retry, not a completed skip', async () => {
+    const { d, db, metrics } = deps();
+    // The tenant-scoped read in runReport finds no row.
+    db.on('FROM report_jobs', []);
+    const result = await dispatch(d, env(reportEnv()));
+    expect(result).toMatchObject({ kind: 'retry', error: 'job-row-missing' });
+    // The claim must be released, not settled: a settled claim would make the
+    // relay's later delivery a no-op ("replay") and lose the job.
+    expect(db.calls.some((c) => c.sql.includes('idempotency_release'))).toBe(true);
+    expect(db.calls.some((c) => c.sql.includes('idempotency_complete'))).toBe(false);
+    expect(
+      await counterValue(
+        metrics.registry as unknown as RegistryLike,
+        'queue_job_results_total',
+        'retry',
+      ),
+    ).toBe(1);
+  });
+
+  it('counts a handler-level skip as skipped, not completed', async () => {
+    const { d, db, metrics } = deps();
+    // The row is visible and already terminal — a genuine, permanent skip.
+    db.on('FROM report_jobs', [
+      { status: 'completed', format: 'json', options: null, project_scope: null, attempts: 4 },
+    ]);
+    const result = await dispatch(d, env(reportEnv()));
+    expect(result).toMatchObject({ kind: 'skipped', reason: 'already-completed' });
+    // A genuine skip still settles the claim (a replay of the same delivery
+    // must stay a no-op) — but it must be *visible* as a skip, because
+    // "completed" lying about skipped work is how the bug above hid.
+    expect(db.calls.some((c) => c.sql.includes('idempotency_complete'))).toBe(true);
+    expect(
+      await counterValue(
+        metrics.registry as unknown as RegistryLike,
+        'queue_job_results_total',
+        'skipped',
+      ),
+    ).toBe(1);
+    expect(
+      await counterValue(
+        metrics.registry as unknown as RegistryLike,
+        'queue_job_results_total',
+        'completed',
+      ),
+    ).toBe(0);
+  });
 });
 
 describe('failure policy', () => {
@@ -328,3 +381,21 @@ describe('e-mail handlers', () => {
     expect(sent[0]!.text).toContain('11111111');
   });
 });
+
+/** A report.generate envelope whose payload satisfies the shared zod contract. */
+function reportEnv(over: Partial<JobEnvelope> = {}): JobEnvelope {
+  return env({
+    topic: JOBS.reportGenerate,
+    payload: {
+      kind: JOBS.reportGenerate,
+      tenantId: TENANT,
+      jobId: '99999999-9999-4999-8999-999999999999',
+      requestedBy: USER,
+      options: { range: null, format: 'json', includeArchived: false },
+      idempotencyKey: 'job:report:abc',
+      requestedAt: '2026-09-29T00:00:00.000Z',
+    },
+    idempotencyKey: 'job:report:abc',
+    ...over,
+  });
+}

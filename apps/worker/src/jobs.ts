@@ -154,6 +154,30 @@ export async function dispatch(deps: DispatchDeps, env: JobEnvelope): Promise<Di
 
   try {
     const detail = await runHandler(deps, env);
+    // Handlers may return a *signal* instead of a result: `skipped` (work was
+    // genuinely unnecessary — already completed, cancelled) or `retry` (a
+    // transient condition the transport should re-schedule, e.g. the report
+    // row losing the race against the enqueue COMMIT). Classifying these as
+    // plain 'completed' once made a real bug invisible: the report handler's
+    // "row not visible yet" path incremented `completed`, settled the
+    // idempotency claim, and the job was never run — all metrics green.
+    const signal = asSignal(detail);
+    if (signal?.kind === 'retry') {
+      // Release the claim so the redelivery can take it, then let the
+      // transport own the schedule (BullMQ backoff / outbox next_attempt_at).
+      await release(deps, env.tenantId, claimKey);
+      deps.metrics.jobResults.inc({ queue, job: env.topic, outcome: 'retry' });
+      return {
+        kind: 'retry',
+        afterMs: backoffMs(Math.max(1, env.attempts)),
+        error: signal.reason,
+      };
+    }
+    if (signal?.kind === 'skipped') {
+      await settle(deps, env.tenantId, claimKey, 200, detail);
+      deps.metrics.jobResults.inc({ queue, job: env.topic, outcome: 'skipped' });
+      return { kind: 'skipped', reason: signal.reason };
+    }
     await settle(deps, env.tenantId, claimKey, 200, detail);
     deps.metrics.jobResults.inc({ queue, job: env.topic, outcome: 'completed' });
     const seconds = (performance.now() - startedAt) / 1000;
@@ -212,6 +236,25 @@ export function queueOf(topic: JobName): string {
       throw new Error(`no queue for job ${String(exhaustive)}`);
     }
   }
+}
+
+/**
+ * Narrow a handler's return value to a `skipped`/`retry` signal, or null for a
+ * normal result. Structural on purpose: handlers keep returning plain data
+ * objects (email sends return `{messageId, transport}`), and only the explicit
+ * `kind` field opts into signalling — an email result that happens to grow a
+ * `kind: 'skipped'` field would be a code-review smell, not a silent semantic
+ * change.
+ */
+function asSignal(detail: unknown): { kind: 'skipped' | 'retry'; reason: string } | null {
+  if (typeof detail !== 'object' || detail === null) {
+    return null;
+  }
+  const d = detail as { kind?: unknown; reason?: unknown };
+  if ((d.kind === 'skipped' || d.kind === 'retry') && typeof d.reason === 'string') {
+    return { kind: d.kind, reason: d.reason };
+  }
+  return null;
 }
 
 async function runHandler(deps: DispatchDeps, env: JobEnvelope): Promise<unknown> {
