@@ -88,6 +88,24 @@ export async function registerRedis(app: FastifyInstance, cfg: AppConfig): Promi
       app.log.debug({ op, err: String(err) }, 'redis cache op failed (degrading)'),
   });
 
+  // `enableOfflineQueue: false` (correctly) rejects commands issued before the
+  // connection is ready, so pinging immediately after construction races the
+  // handshake and reports a healthy Redis as down. Wait for `ready` first —
+  // bounded, because the boot must not hang on a dead Redis either.
+  await new Promise<void>((resolve) => {
+    if (client.status === 'ready') {
+      return resolve();
+    }
+    const timer = setTimeout(() => resolve(), 2_000);
+    client.once('ready', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    client.once('end', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
   try {
     handle.live = (await client.ping()) === 'PONG';
   } catch (err) {

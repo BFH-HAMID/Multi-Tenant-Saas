@@ -23,10 +23,13 @@ export function createQueueDepthProbe(
   cfg: AppConfig,
   log: MinimalLogger,
 ): () => Promise<QueueDepth> {
+  // Bare names + the `prefix` option: BullMQ rejects ':' in a queue *name*, and
+  // the producer/worker/probe must all address the very same Redis keys.
   const queues = Object.values(QUEUES).map(
     (name) =>
-      new Queue(`${cfg.env.QUEUE_NAME_PREFIX}:${name}`, {
+      new Queue(name, {
         connection: redisConnectionFor(cfg),
+        prefix: cfg.env.QUEUE_NAME_PREFIX,
         // Probing must not create connections eagerly on boot.
       }),
   );
@@ -44,12 +47,11 @@ export function createQueueDepthProbe(
       queues.map(async (q) => {
         try {
           const raw = await q.getJobCounts();
-          const shortName = q.name.split(':').slice(1).join(':');
-          counts[shortName] = raw as unknown as Record<string, number>;
+          counts[q.name] = raw as unknown as Record<string, number>;
 
           const waiting = await q.getWaiting(0, 0);
           const first = waiting[0];
-          oldest[shortName] = first ? (Date.now() - (first.timestamp ?? Date.now())) / 1000 : 0;
+          oldest[q.name] = first ? (Date.now() - (first.timestamp ?? Date.now())) / 1000 : 0;
         } catch (err) {
           log.debug({ queue: q.name, err: String(err) }, 'queue depth read failed');
         }

@@ -64,12 +64,20 @@ export function createLimiter(
   void redis.preload();
 
   const primary: RateLimiterBackend = redis;
-  const composite = cfg.env.RATE_LIMIT_FALLBACK_MEMORY
-    ? new DegradingBackend(primary, new CountingBackend(memory, metrics, true), metrics, state, log)
-    : new CountingBackend(primary, metrics, false);
+  // The counting wrapper belongs *outside* the degradation wrapper: it must see
+  // every decision (allow/throttle), whichever backend made it. Wrapping only
+  // the memory fallback — the tempting reading of "count where the decision is
+  // cheap" — leaves the Redis path uncounted, which is exactly the path
+  // production runs; the series then stays empty and the `throttlePct` gate in
+  // the load tests reports 0/0 forever. `DegradingBackend` keeps its own
+  // `outcome="fallback"` counter for degradation *events*, so the two tell
+  // different stories on purpose.
+  const inner: RateLimiterBackend = cfg.env.RATE_LIMIT_FALLBACK_MEMORY
+    ? new DegradingBackend(primary, memory, metrics, state, log)
+    : primary;
 
   return {
-    backend: composite,
+    backend: new CountingBackend(inner, metrics, false),
     state,
     close: async () => {
       await redis.close();
