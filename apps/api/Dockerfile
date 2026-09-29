@@ -38,6 +38,11 @@ COPY --from=build --chown=node:node /repo/node_modules ./node_modules
 COPY --from=build --chown=node:node /repo/packages/shared/dist ./packages/shared/dist
 COPY --from=build --chown=node:node /repo/packages/shared/package.json ./packages/shared/package.json
 COPY --from=build --chown=node:node /repo/db/dist ./db/dist
+# Raw SQL for the compose `migrate` service / k8s migrate Job, which reuse this
+# image with a different command. The migrations run as SQL files loaded from
+# disk — they are not inlined into db/dist — so an image that can migrate must
+# ship them. (apps/worker/Dockerfile intentionally does not copy them.)
+COPY --from=build --chown=node:node /repo/db/migrations ./db/migrations
 COPY --from=build --chown=node:node /repo/db/package.json ./db/package.json
 COPY --from=build --chown=node:node /repo/apps/api/dist ./apps/api/dist
 COPY --from=build --chown=node:node /repo/apps/api/package.json ./apps/api/package.json
