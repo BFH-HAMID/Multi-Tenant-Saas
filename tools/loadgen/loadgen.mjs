@@ -45,6 +45,21 @@ if (args.help) {
 }
 const configPath = args.config ?? 'loadtests/load.config.json';
 const cfg = JSON.parse(await readFile(configPath, 'utf8'));
+
+// `--no-run` is the regeneration path: emitting a k6 script is a pure
+// config → source transformation and must not need a live API. The CI sync
+// gate runs on a runner with no stack up, and "regenerate the script" on a
+// laptop should not cost a load run either.
+if (args.noRun) {
+  if (!args.emitK6) {
+    console.error('--no-run needs --emit-k6: with no run there is nothing to do');
+    process.exit(2);
+  }
+  await writeFile(args.emitK6, toK6Script(cfg, configPath));
+  console.log(`wrote ${args.emitK6} from ${configPath} (--no-run, no load executed)`);
+  process.exit(0);
+}
+
 const baseUrl = args.baseUrl ?? cfg.baseUrl ?? 'http://127.0.0.1:3000';
 const metricsUrl = args.metricsUrl ?? cfg.metricsUrl ?? 'http://127.0.0.1:9464/metrics';
 const durationMs = parseDuration(args.duration ?? String(cfg.duration ?? '30s'));
@@ -1003,6 +1018,7 @@ function parseArgs(argv) {
     else if (a === '--duration') out.duration = argv[++i];
     else if (a === '--out') out.out = argv[++i];
     else if (a === '--emit-k6') out.emitK6 = argv[++i];
+    else if (a === '--no-run') out.noRun = true;
     else throw new Error(`unknown argument ${a}\n\n${usage()}`);
   }
   return out;
@@ -1020,7 +1036,7 @@ function usage() {
 
   node tools/loadgen/loadgen.mjs --config loadtests/load.config.json
        [--base-url URL] [--metrics-url URL] [--duration 30s]
-       [--out results.json] [--emit-k6 loadtests/generated.js]
+       [--out results.json] [--emit-k6 loadtests/generated.js] [--no-run]
 
 Config keys: baseUrl, metricsUrl, vus, duration, rampUp, thinkMs, slugPrefix,
 seedProjects, tenants[{count,plan|useSeed,user,password}], victims[labels],

@@ -60,13 +60,13 @@ jobs:
 
       - name: Generated k6 scripts are in sync with their configs
         run: |
-          node tools/loadgen/loadgen.mjs --config loadtests/smoke.config.json      --emit-k6 /tmp/smoke.js --duration 1s >/dev/null
-          node tools/loadgen/loadgen.mjs --config loadtests/load.config.json       --emit-k6 /tmp/load.js  --duration 1s >/dev/null
-          node tools/loadgen/loadgen.mjs --config loadtests/isolation.config.json  --emit-k6 /tmp/tenant-isolation.js --duration 1s >/dev/null
+          node tools/loadgen/loadgen.mjs --config loadtests/smoke.config.json      --emit-k6 /tmp/smoke.js --no-run
+          node tools/loadgen/loadgen.mjs --config loadtests/load.config.json       --emit-k6 /tmp/load.js  --no-run
+          node tools/loadgen/loadgen.mjs --config loadtests/isolation.config.json  --emit-k6 /tmp/tenant-isolation.js --no-run
           for f in smoke load tenant-isolation; do
             if ! diff -u "loadtests/$f.js" "/tmp/$f.js" > "/tmp/$f.diff"; then
               echo "::error::loadtests/$f.js is out of sync with its config. Regenerate with:"
-              echo "  node tools/loadgen/loadgen.mjs --config loadtests/$f.config.json --emit-k6 loadtests/$f.js --duration 1s"
+              echo "  make load-regen"
               cat "/tmp/$f.diff"
               exit 1
             fi

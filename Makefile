@@ -163,9 +163,9 @@ load-k6: ## Same three experiments via k6 (requires k6 installed)
 
 .PHONY: load-regen
 load-regen: ## Regenerate the k6 scripts from their JSON configs (never hand-edit)
-	node tools/loadgen/loadgen.mjs --config loadtests/smoke.config.json     --emit-k6 loadtests/smoke.js --duration 1s >/dev/null
-	node tools/loadgen/loadgen.mjs --config loadtests/load.config.json      --emit-k6 loadtests/load.js --duration 1s >/dev/null
-	node tools/loadgen/loadgen.mjs --config loadtests/isolation.config.json --emit-k6 loadtests/tenant-isolation.js --duration 1s >/dev/null
+	node tools/loadgen/loadgen.mjs --config loadtests/smoke.config.json     --emit-k6 loadtests/smoke.js --no-run
+	node tools/loadgen/loadgen.mjs --config loadtests/load.config.json      --emit-k6 loadtests/load.js --no-run
+	node tools/loadgen/loadgen.mjs --config loadtests/isolation.config.json --emit-k6 loadtests/tenant-isolation.js --no-run
 	@echo "loadtests/{smoke,load,tenant-isolation}.js regenerated"
 
 # ----------------------------------------------------------------- docker ---
